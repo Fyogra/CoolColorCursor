@@ -76,11 +76,10 @@ def create_tray_icon():
     painter.setPen(border_pen)
     painter.drawPath(bg_path)
 
-    # 2. Неоновый шлейф (начинается прямо ИЗ ВЕРШИНЫ курсора: x=36, y=36)
+    # 2. Неоновый шлейф
     trail_path = QPainterPath()
     trail_path.moveTo(36, 36)
     
-    # Плавная петелька вверх и вправо
     trail_path.cubicTo(36, 10, 85, 10, 85, 45)
     trail_path.cubicTo(85, 90, 20, 85, 105, 108)
 
@@ -110,20 +109,17 @@ def create_tray_icon():
     cursor_path.lineTo(74, 62)      # Правый край
     cursor_path.closeSubpath()
 
-    # Заливка курсора и неоновый контур
     painter.setBrush(QBrush(QColor("#161622")))
     cursor_pen = QPen(QColor("#00ffc8"), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
     painter.setPen(cursor_pen)
     painter.drawPath(cursor_path)
 
-    # Яркая белая точка-источник прямо на вершине
     painter.setPen(Qt.NoPen)
     painter.setBrush(QBrush(QColor("#ffffff")))
     painter.drawEllipse(QPointF(36, 36), 4.5, 4.5)
 
     painter.end()
 
-    # Автоматически сохраняем файл иконки для сборки в EXE
     icon_path = os.path.join(BASE_DIR, "app_icon.ico")
     if not os.path.exists(icon_path):
         pixmap.save(icon_path, "ICO")
@@ -403,6 +399,7 @@ WS_EX_TRANSPARENT = 0x00000020
 WS_EX_LAYERED     = 0x00080000
 WS_EX_NOACTIVATE  = 0x08000000
 WS_EX_TOOLWINDOW  = 0x00000080
+WS_EX_TOPMOST     = 0x00000008
 GWL_EXSTYLE       = -20
 
 HWND_TOPMOST  = -1
@@ -421,10 +418,12 @@ class MouseTrailOverlay(QWidget):
         self.points = deque()
         self.last_raw_pos = None
 
+        # ИСПРАВЛЕНИЕ: Добавлен флаг Qt.WindowStaysOnTopHint
         self.setWindowFlags(
             Qt.FramelessWindowHint |
             Qt.Tool |
-            Qt.WindowTransparentForInput
+            Qt.WindowTransparentForInput |
+            Qt.WindowStaysOnTopHint
         )
         self.setAttribute(Qt.WA_TranslucentBackground, True)
         
@@ -459,10 +458,11 @@ class MouseTrailOverlay(QWidget):
             hwnd = int(self.winId())
             style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
             
+            # ИСПРАВЛЕНИЕ: Добавлен флаг WS_EX_TOPMOST в стили Windows
             ctypes.windll.user32.SetWindowLongW(
                 hwnd, 
                 GWL_EXSTYLE, 
-                style | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+                style | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
             )
             
             ctypes.windll.user32.SetWindowPos(
