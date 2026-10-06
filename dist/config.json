@@ -1,0 +1,14 @@
+{
+    "color1": "#b0f3ff",
+    "color2": "#eaebe4",
+    "max_width": 12,
+    "fade_time": 0.4,
+    "autostart_asked": true,
+    "autostart_enabled": false,
+    "history": [
+        [
+            "#b0f3ff",
+            "#eaebe4"
+        ]
+    ]
+}
