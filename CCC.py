@@ -1,952 +1,999 @@
-import sys
-import time
-import math
-import ctypes
-import random
-import logging
+# -*- coding: utf-8 -*-
+"""
+CCC | CoolColorCursor
+Неоновый шлейф за курсором мыши поверх всех окон. Windows, PyQt5.
+"""
+from __future__ import annotations
+
 import json
+import logging
+import math
 import os
-import winreg
+import random
+import sys
+import tempfile
+import time
 from collections import deque
+from functools import lru_cache
+from logging.handlers import RotatingFileHandler
 
-from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout, 
-                             QLabel, QSlider, QPushButton, QFrame, QGraphicsDropShadowEffect,
-                             QStyle, QStyleOptionSlider, QDialog, QSystemTrayIcon, QMenu, QAction)
-from PyQt5.QtCore import Qt, QTimer, QPointF, QRectF, QPoint, pyqtSignal
-from PyQt5.QtGui import (QPainter, QPen, QColor, QCursor, QFont, QConicalGradient, 
-                             QRadialGradient, QBrush, QIcon, QPixmap, QPainterPath, QLinearGradient)
+from PyQt5.QtCore import QPointF, QRect, QRectF, QSharedMemory, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import (QBrush, QColor, QConicalGradient, QCursor, QFont, QIcon,
+                         QLinearGradient, QPainter, QPainterPath, QPen, QPixmap,
+                         QRadialGradient)
+from PyQt5.QtWidgets import (QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMenu,
+                             QPushButton, QSlider, QStyle, QStyleOptionSlider,
+                             QSystemTrayIcon, QVBoxLayout, QWidget)
 
-# --- НАДЕЖНОЕ ОПРЕДЕЛЕНИЕ ПАПКИ ДЛЯ ФАЙЛОВ ---
-if getattr(sys, 'frozen', False):
-    BASE_DIR = os.path.dirname(sys.executable)
-else:
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+# ──────────────────────────────────────────────────────────────────────────────
+#  Платформа (WinAPI нужен только для «сквозного» окна и автозапуска)
+# ──────────────────────────────────────────────────────────────────────────────
+IS_WINDOWS = sys.platform == "win32"
 
-CONFIG_FILE = os.path.join(BASE_DIR, "config.json")
-LOG_FILE = os.path.join(BASE_DIR, "mouse_trail.log")
+if IS_WINDOWS:
+    import ctypes
+    import winreg
+    from ctypes import wintypes
 
-REG_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+    _user32 = ctypes.WinDLL("user32", use_last_error=True)
+    _user32.GetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int]
+    _user32.GetWindowLongW.restype = ctypes.c_long
+    _user32.SetWindowLongW.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
+    _user32.SetWindowLongW.restype = ctypes.c_long
+    _user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
+                                     ctypes.c_int, ctypes.c_int, wintypes.UINT]
+    _user32.SetWindowPos.restype = wintypes.BOOL
+
+GWL_EXSTYLE = -20
+WS_EX_TRANSPARENT = 0x00000020
+WS_EX_TOOLWINDOW = 0x00000080
+WS_EX_LAYERED = 0x00080000
+WS_EX_NOACTIVATE = 0x08000000
+HWND_TOPMOST = -1
+SWP_NOSIZE = 0x0001
+SWP_NOMOVE = 0x0002
+SWP_NOACTIVATE = 0x0010
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Константы, пути, логирование
+# ──────────────────────────────────────────────────────────────────────────────
 APP_NAME = "CCC"
+APP_TITLE = "CCC|CoolColorCursor"
+REG_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 
-# --- НАСТРОЙКА ЛОГИРОВАНИЯ ---
-logging.basicConfig(
-    filename=LOG_FILE,
-    filemode='a',
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    level=logging.INFO,
-    encoding='utf-8'
-)
+# Тема
+BG = "#111118"
+BORDER = "#222233"
+ACCENT = "#00ffc8"
+DANGER = "#ff0055"
+TEXT = "#dddddd"
+MUTED = "#aaaaaa"
+DIM = "#666666"
+FONT = "Segoe UI"
+FONT_SYMBOL = "Segoe UI Symbol"
+
+DEFAULT_C1 = "#00ccff"
+DEFAULT_C2 = "#ff0080"
+HISTORY_SIZE = 5
+
+log = logging.getLogger("ccc")
 
 
-# --- ФУНКЦИИ АВТОЗАГРУЗКИ ---
-def set_autostart(enable: bool):
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.abspath(__file__))
+
+
+def _data_dir() -> str:
+    """Папка для конфига и лога: рядом с программой, а если туда нельзя писать — в %APPDATA%."""
+    base = _app_dir()
+    if os.access(base, os.W_OK):
+        return base
+    fallback = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
     try:
-        key = winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_AUTOSTART_KEY, 0, winreg.KEY_ALL_ACCESS)
-        if enable:
-            exe_path = f'"{os.path.abspath(sys.argv[0])}"'
-            winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, exe_path)
-            logging.info("Добавлено в автозагрузку")
-        else:
-            try:
-                winreg.DeleteValue(key, APP_NAME)
-                logging.info("Удалено из автозагрузки")
-            except FileNotFoundError:
-                pass
-        winreg.CloseKey(key)
-    except Exception as e:
-        logging.error(f"Ошибка настройки автозагрузки: {e}")
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+    except OSError:
+        return tempfile.gettempdir()
 
 
-# --- ГЕНЕРАЦИЯ СТИЛИЗОВАННОЙ НЕОНОВОЙ ИКОНКИ ---
-def create_tray_icon():
+DATA_DIR = _data_dir()
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+LOG_FILE = os.path.join(DATA_DIR, "mouse_trail.log")
+ICON_FILE = os.path.join(DATA_DIR, "app_icon.ico")
+
+
+def setup_logging() -> None:
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.setLevel(logging.INFO)
+    log.addHandler(handler)
+
+    def log_uncaught(exc_type, exc, tb):
+        # Без своего excepthook PyQt5 роняет процесс на любом исключении внутри слота
+        log.critical("Необработанное исключение", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = log_uncaught
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Автозапуск
+# ──────────────────────────────────────────────────────────────────────────────
+def autostart_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    # Запуск .py напрямую открыл бы его в ассоциированной программе, поэтому — pythonw
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    interpreter = pythonw if os.path.exists(pythonw) else sys.executable
+    return f'"{interpreter}" "{os.path.abspath(__file__)}"'
+
+
+def set_autostart(enable: bool) -> bool:
+    """Добавляет/убирает программу из автозапуска. Возвращает True при успехе."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_AUTOSTART_KEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if enable:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+                log.info("Добавлено в автозагрузку")
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                    log.info("Удалено из автозагрузки")
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as e:
+        log.error("Ошибка настройки автозагрузки: %s", e)
+        return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Настройки
+# ──────────────────────────────────────────────────────────────────────────────
+def _clamp(value, lo, hi, default, scale=1.0):
+    try:
+        return max(lo, min(hi, int(round(float(value) * scale))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _color(value, default) -> QColor:
+    color = QColor(str(value))
+    return color if color.isValid() else QColor(default)
+
+
+class Settings:
+    """Настройки приложения. Формат config.json совместим со старой версией."""
+
+    def __init__(self):
+        self.colors = [QColor(DEFAULT_C1), QColor(DEFAULT_C2)]
+        self.max_width = 12
+        self.fade_ms = 400
+        self.autostart_asked = False
+        self.autostart_enabled = False
+        self.history = []  # [(QColor, QColor), ...], свежие — в начале
+
+    @classmethod
+    def load(cls, path: str) -> "Settings":
+        s = cls()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError("корень конфигурации — не объект")
+        except FileNotFoundError:
+            return s
+        except (OSError, ValueError) as e:
+            log.error("Ошибка загрузки конфигурации: %s", e)
+            return s
+
+        s.colors = [_color(raw.get("color1"), DEFAULT_C1), _color(raw.get("color2"), DEFAULT_C2)]
+        s.max_width = _clamp(raw.get("max_width", 12), 2, 50, 12)
+        s.fade_ms = _clamp(raw.get("fade_time", 0.4), 100, 1500, 400, scale=1000)
+        s.autostart_asked = bool(raw.get("autostart_asked", False))
+        s.autostart_enabled = bool(raw.get("autostart_enabled", False))
+
+        history = raw.get("history")
+        if isinstance(history, list):
+            for item in history[:HISTORY_SIZE]:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    a, b = QColor(str(item[0])), QColor(str(item[1]))
+                    if a.isValid() and b.isValid():
+                        s.history.append((a, b))
+        log.info("Конфигурация загружена")
+        return s
+
+    def save(self, path: str) -> None:
+        data = {
+            "color1": self.colors[0].name(),
+            "color2": self.colors[1].name(),
+            "max_width": self.max_width,
+            "fade_time": self.fade_ms / 1000.0,
+            "autostart_asked": self.autostart_asked,
+            "autostart_enabled": self.autostart_enabled,
+            "history": [[a.name(), b.name()] for a, b in self.history],
+        }
+        tmp = path + ".tmp"
+        try:
+            # Пишем во временный файл и подменяем — конфиг не побьётся при сбое посреди записи
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            os.replace(tmp, path)
+            log.info("Конфигурация сохранена")
+        except OSError as e:
+            log.error("Ошибка сохранения конфигурации: %s", e)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Хелперы интерфейса
+# ──────────────────────────────────────────────────────────────────────────────
+SLIDER_STYLE = f"""
+    QSlider::groove:horizontal {{ height: 4px; background: rgba(28, 28, 43, 0.8); border-radius: 2px; }}
+    QSlider::sub-page:horizontal {{ background: {ACCENT}; border-radius: 2px; }}
+    QSlider::handle:horizontal {{ background: #ffffff; width: 14px; margin: -5px 0; border-radius: 7px; }}
+"""
+
+VALUE_SLIDER_STYLE = """
+    QSlider::groove:horizontal { height: 6px; border-radius: 3px;
+        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #000, stop:1 #fff); }
+    QSlider::handle:horizontal { background: #fff; width: 12px; margin: -3px 0; border-radius: 6px; }
+"""
+
+
+def outline_button_style(color: str, hover_text: str = "#000000") -> str:
+    return (f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a1b26, stop:1 #12131c);"
+            f" color: {color}; border: 2px solid {color}; border-radius: 18px; }}"
+            f" QPushButton:hover {{ background: {color}; color: {hover_text}; }}")
+
+
+def gradient_button_style(c1: str, c2: str, border: str = "#333") -> str:
+    return (f"QPushButton {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c1}, stop:1 {c2});"
+            f" border: 1px solid {border}; border-radius: 6px; }}"
+            f" QPushButton:hover {{ border: 1px solid #ffffff; }}")
+
+
+def make_button(text="", *, size=None, height=None, font=None, style="") -> QPushButton:
+    btn = QPushButton(text)
+    btn.setCursor(Qt.PointingHandCursor)
+    if size:
+        btn.setFixedSize(*size)
+    if height:
+        btn.setFixedHeight(height)
+    if font:
+        btn.setFont(font)
+    if style:
+        btn.setStyleSheet(style)
+    return btn
+
+
+def caption(text: str, size: int = 10, color: str = MUTED) -> QLabel:
+    lbl = QLabel(text)
+    lbl.setStyleSheet(f"color: {color}; font-size: {size}px; font-weight: bold; background: transparent;")
+    return lbl
+
+
+def readable_text_color(bg: QColor) -> str:
+    luminance = 0.299 * bg.red() + 0.587 * bg.green() + 0.114 * bg.blue()
+    return "#000000" if luminance > 150 else "#ffffff"
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Иконка приложения
+# ──────────────────────────────────────────────────────────────────────────────
+@lru_cache(maxsize=1)
+def app_icon() -> QIcon:
+    """Рисует неоновую иконку (один раз) и при необходимости сохраняет её как .ico."""
     size = 128
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
-    
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing, True)
-    
-    # 1. Темный округлый фон под стиль приложения
-    bg_path = QPainterPath()
-    bg_path.addRoundedRect(4, 4, 120, 120, 32, 32)
-    painter.fillPath(bg_path, QColor("#111118"))
-    
-    # Тонкая рамка с легким свечением
-    border_pen = QPen(QColor("#222238"), 3)
-    painter.setPen(border_pen)
-    painter.drawPath(bg_path)
 
-    # 2. Неоновый шлейф
-    trail_path = QPainterPath()
-    trail_path.moveTo(36, 36)
-    
-    trail_path.cubicTo(36, 10, 85, 10, 85, 45)
-    trail_path.cubicTo(85, 90, 20, 85, 105, 108)
+    p = QPainter(pixmap)
+    p.setRenderHint(QPainter.Antialiasing, True)
 
-    # Внешнее неоновое свечение шлейфа
-    glow_pen = QPen(QColor(255, 0, 128, 110), 14, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    painter.setPen(glow_pen)
-    painter.drawPath(trail_path)
+    bg = QPainterPath()
+    bg.addRoundedRect(4, 4, 120, 120, 32, 32)
+    p.fillPath(bg, QColor(BG))
+    p.setPen(QPen(QColor("#222238"), 3))
+    p.drawPath(bg)
 
-    # Основная яркая линия шлейфа с градиентом
-    trail_grad = QLinearGradient(36, 36, 105, 108)
-    trail_grad.setColorAt(0.0, QColor("#00ffc8"))
-    trail_grad.setColorAt(0.5, QColor("#ff0080"))
-    trail_grad.setColorAt(1.0, QColor("#9d00ff"))
-    
-    core_pen = QPen(QBrush(trail_grad), 7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    painter.setPen(core_pen)
-    painter.drawPath(trail_path)
+    trail = QPainterPath()
+    trail.moveTo(36, 36)
+    trail.cubicTo(36, 10, 85, 10, 85, 45)
+    trail.cubicTo(85, 90, 20, 85, 105, 108)
 
-    # 3. Стильный неоновый курсор
-    cursor_path = QPainterPath()
-    cursor_path.moveTo(36, 36)      # Кончик
-    cursor_path.lineTo(36, 80)      # Левый край
-    cursor_path.lineTo(48, 68)      # Внутренний угол
-    cursor_path.lineTo(60, 92)      # Ножка право
-    cursor_path.lineTo(70, 87)      # Низ ножки
-    cursor_path.lineTo(58, 62)      # Ножка лево
-    cursor_path.lineTo(74, 62)      # Правый край
-    cursor_path.closeSubpath()
+    p.setPen(QPen(QColor(255, 0, 128, 110), 14, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPath(trail)
 
-    painter.setBrush(QBrush(QColor("#161622")))
-    cursor_pen = QPen(QColor("#00ffc8"), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    painter.setPen(cursor_pen)
-    painter.drawPath(cursor_path)
+    grad = QLinearGradient(36, 36, 105, 108)
+    grad.setColorAt(0.0, QColor(ACCENT))
+    grad.setColorAt(0.5, QColor("#ff0080"))
+    grad.setColorAt(1.0, QColor("#9d00ff"))
+    p.setPen(QPen(QBrush(grad), 7, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPath(trail)
 
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QBrush(QColor("#ffffff")))
-    painter.drawEllipse(QPointF(36, 36), 4.5, 4.5)
+    cursor = QPainterPath()
+    cursor.moveTo(36, 36)
+    for x, y in ((36, 80), (48, 68), (60, 92), (70, 87), (58, 62), (74, 62)):
+        cursor.lineTo(x, y)
+    cursor.closeSubpath()
 
-    painter.end()
+    p.setBrush(QBrush(QColor("#161622")))
+    p.setPen(QPen(QColor(ACCENT), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.drawPath(cursor)
 
-    icon_path = os.path.join(BASE_DIR, "app_icon.ico")
-    if not os.path.exists(icon_path):
-        pixmap.save(icon_path, "ICO")
+    p.setPen(Qt.NoPen)
+    p.setBrush(QBrush(QColor("#ffffff")))
+    p.drawEllipse(QPointF(36, 36), 4.5, 4.5)
+    p.end()
 
+    if not os.path.exists(ICON_FILE):
+        try:
+            pixmap.save(ICON_FILE, "ICO")
+        except Exception as e:  # noqa: BLE001 — иконка не критична
+            log.warning("Не удалось сохранить иконку: %s", e)
     return QIcon(pixmap)
 
 
-# --- ДИАЛОГ АВТОЗАПУСКА ---
-class AutostartDialog(QDialog):
-    def __init__(self, parent=None):
+# ──────────────────────────────────────────────────────────────────────────────
+#  Базовые виджеты
+# ──────────────────────────────────────────────────────────────────────────────
+class FramelessCard(QDialog):
+    """Безрамочный диалог с тёмной скруглённой карточкой. Содержимое — в self.body."""
+
+    def __init__(self, size, radius, border_width, parent=None):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(320, 180)
+        self.setFixedSize(*size)
 
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(10, 10, 10, 10)
 
-        bg_frame = QFrame(self)
-        bg_frame.setStyleSheet("""
-            QFrame {
-                background-color: #111118;
-                border-radius: 16px;
-                border: 2px solid #00ffc8;
-            }
-        """)
-        frame_layout = QVBoxLayout(bg_frame)
-        frame_layout.setContentsMargins(20, 20, 20, 20)
-        frame_layout.setSpacing(15)
-
-        title = QLabel("АВТОЗАПУСК")
-        title.setFont(QFont("Segoe UI", 11, QFont.Bold))
-        title.setStyleSheet("color: #00ffc8; border: none;")
-        title.setAlignment(Qt.AlignCenter)
-        frame_layout.addWidget(title)
-
-        text = QLabel("Хотите ли вы добавить приложение\nв автозапуск Windows?")
-        text.setFont(QFont("Segoe UI", 9))
-        text.setStyleSheet("color: #dddddd; border: none;")
-        text.setAlignment(Qt.AlignCenter)
-        frame_layout.addWidget(text)
-
-        btns_layout = QHBoxLayout()
-        btns_layout.setSpacing(10)
-
-        btn_yes = QPushButton("ДА")
-        btn_yes.setFixedHeight(32)
-        btn_yes.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        btn_yes.setCursor(Qt.PointingHandCursor)
-        btn_yes.setStyleSheet("""
-            QPushButton {
-                background: #00ffc8;
-                color: #000000;
-                border: none;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background: #00cc99;
-            }
-        """)
-        btn_yes.clicked.connect(self.accept)
-
-        btn_no = QPushButton("НЕТ")
-        btn_no.setFixedHeight(32)
-        btn_no.setFont(QFont("Segoe UI", 9, QFont.Bold))
-        btn_no.setCursor(Qt.PointingHandCursor)
-        btn_no.setStyleSheet("""
-            QPushButton {
-                background: #222233;
-                color: #888888;
-                border: 1px solid #444455;
-                border-radius: 8px;
-            }
-            QPushButton:hover {
-                background: #333344;
-                color: #ffffff;
-            }
-        """)
-        btn_no.clicked.connect(self.reject)
-
-        btns_layout.addWidget(btn_yes)
-        btns_layout.addWidget(btn_no)
-        frame_layout.addLayout(btns_layout)
-
-        layout.addWidget(bg_frame)
+        card = QFrame(self)
+        card.setObjectName("card")  # селектор по имени, чтобы стиль не «протекал» на QLabel
+        card.setStyleSheet(f"#card {{ background-color: {BG}; border-radius: {radius}px;"
+                           f" border: {border_width}px solid {ACCENT}; }}")
+        outer.addWidget(card)
+        self.body = QVBoxLayout(card)
 
 
-# --- КАСТОМНЫЙ ПОЛЗУНОК ---
 class ClickSlider(QSlider):
+    """Ползунок, который прыгает в точку клика, а не двигается шагами."""
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             opt = QStyleOptionSlider()
             self.initStyleOption(opt)
-            sr = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
-            
+            groove = self.style().subControlRect(QStyle.CC_Slider, opt, QStyle.SC_SliderGroove, self)
+            handle = self.style().pixelMetric(QStyle.PM_SliderLength, opt, self)
+
             if self.orientation() == Qt.Horizontal:
-                slider_length = self.style().pixelMetric(QStyle.PM_SliderLength, opt, self)
-                slider_min = sr.x()
-                slider_max = sr.right() - slider_length + 1
-                pos = event.pos().x() - slider_length // 2
-                val = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), pos - slider_min, slider_max - slider_min, opt.upsideDown)
+                pos, start, span = event.pos().x(), groove.x(), groove.width()
             else:
-                slider_length = self.style().pixelMetric(QStyle.PM_SliderLength, opt, self)
-                slider_min = sr.y()
-                slider_max = sr.bottom() - slider_length + 1
-                pos = event.pos().y() - slider_length // 2
-                val = QStyle.sliderValueFromPosition(self.minimum(), self.maximum(), pos - slider_min, slider_max - slider_min, opt.upsideDown)
-            
-            self.setValue(val)
+                pos, start, span = event.pos().y(), groove.y(), groove.height()
+
+            self.setValue(QStyle.sliderValueFromPosition(
+                self.minimum(), self.maximum(), pos - handle // 2 - start, span - handle, opt.upsideDown))
             event.accept()
-        super().mousePressEvent(event)
+        super().mousePressEvent(event)  # ручка уже под курсором — дальше работает обычное перетаскивание
 
 
-# --- КАСТОМНОЕ ЦВЕТОВОЕ КОЛЕСО ---
+class DragHeader(QFrame):
+    """Шапка, за которую можно таскать всё окно."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._offset = None
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            self._offset = event.globalPos() - self.window().frameGeometry().topLeft()
+
+    def mouseMoveEvent(self, event):
+        if self._offset is not None and event.buttons() & Qt.LeftButton:
+            self.window().move(event.globalPos() - self._offset)
+
+    def mouseReleaseEvent(self, event):
+        self._offset = None
+
+
 class ColorWheel(QWidget):
+    """Цветовое колесо (оттенок + насыщенность); яркость задаётся снаружи."""
+
     colorChanged = pyqtSignal(QColor)
+    MARGIN = 8
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(180, 180)
-        self.hue = 0.0          
-        self.sat = 1.0          
-        self.val = 1.0          
+        self.hue, self.sat, self.val = 0.0, 1.0, 1.0
         self.current_color = QColor.fromHsvF(self.hue, self.sat, self.val)
-        self.is_dragging = False
+        self._dragging = False
+
+    def _geometry(self):
+        center = QPointF(self.width() / 2, self.height() / 2)
+        return center, min(self.width(), self.height()) / 2 - self.MARGIN
 
     def set_color(self, color: QColor):
         h, s, v, _ = color.getHsvF()
-        if h >= 0:
+        if h >= 0:  # у серых/чёрных/белых оттенок не определён — оставляем прежний
             self.hue = h
-        self.sat = s
-        self.val = v
+        self.sat, self.val = s, v
         self.current_color = QColor(color)
         self.update()
 
-    def set_value(self, value_f: float):
-        self.val = max(0.0, min(1.0, value_f))
+    def set_value(self, value: float):
+        self.val = max(0.0, min(1.0, value))
         self.current_color = QColor.fromHsvF(self.hue, self.sat, self.val)
         self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        center, radius = self._geometry()
 
-        center = QPointF(self.width() / 2, self.height() / 2)
-        radius = min(self.width(), self.height()) / 2 - 8
-
-        c_grad = QConicalGradient(center, 0)
+        conical = QConicalGradient(center, 0)
         for deg in range(0, 360, 10):
-            c_grad.setColorAt(deg / 360.0, QColor.fromHsvF(deg / 360.0, 1.0, self.val))
-        c_grad.setColorAt(1.0, QColor.fromHsvF(0.0, 1.0, self.val))
+            conical.setColorAt(deg / 360.0, QColor.fromHsvF(deg / 360.0, 1.0, self.val))
+        conical.setColorAt(1.0, QColor.fromHsvF(0.0, 1.0, self.val))
+        p.setPen(Qt.NoPen)
+        p.setBrush(QBrush(conical))
+        p.drawEllipse(center, radius, radius)
 
-        painter.setBrush(QBrush(c_grad))
-        painter.setPen(Qt.NoPen)
-        painter.drawEllipse(center, radius, radius)
+        radial = QRadialGradient(center, radius)
+        radial.setColorAt(0.0, QColor.fromHsvF(0.0, 0.0, self.val))
+        radial.setColorAt(1.0, QColor.fromHsvF(0.0, 0.0, self.val, 0.0))
+        p.setBrush(QBrush(radial))
+        p.drawEllipse(center, radius, radius)
 
-        r_grad = QRadialGradient(center, radius)
-        center_color = QColor.fromHsvF(0.0, 0.0, self.val)
-        edge_color = QColor.fromHsvF(0.0, 0.0, self.val, 0)
-
-        r_grad.setColorAt(0.0, center_color)
-        r_grad.setColorAt(1.0, edge_color)
-
-        painter.setBrush(QBrush(r_grad))
-        painter.drawEllipse(center, radius, radius)
-
-        angle_rad = math.radians(self.hue * 360.0)
+        angle = math.radians(self.hue * 360.0)
         dist = self.sat * radius
-        marker_x = center.x() + dist * math.cos(angle_rad)
-        marker_y = center.y() - dist * math.sin(angle_rad)
-
-        painter.setPen(QPen(QColor(0, 0, 0, 150), 3))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawEllipse(QPointF(marker_x, marker_y), 7, 7)
-
-        painter.setPen(QPen(QColor(255, 255, 255), 2))
-        painter.drawEllipse(QPointF(marker_x, marker_y), 6, 6)
+        marker = QPointF(center.x() + dist * math.cos(angle), center.y() - dist * math.sin(angle))
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(0, 0, 0, 150), 3))
+        p.drawEllipse(marker, 7, 7)
+        p.setPen(QPen(QColor(255, 255, 255), 2))
+        p.drawEllipse(marker, 6, 6)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.is_dragging = True
-            self.update_color_from_pos(event.pos())
+            self._dragging = True
+            self._pick(event.pos())
 
     def mouseMoveEvent(self, event):
-        if self.is_dragging:
-            self.update_color_from_pos(event.pos())
+        if self._dragging:
+            self._pick(event.pos())
 
     def mouseReleaseEvent(self, event):
         if event.button() == Qt.LeftButton:
-            self.is_dragging = False
+            self._dragging = False
 
-    def update_color_from_pos(self, pos):
-        center = QPointF(self.width() / 2, self.height() / 2)
-        radius = min(self.width(), self.height()) / 2 - 8
-
-        dx = pos.x() - center.x()
-        dy = center.y() - pos.y()
-
-        dist = math.hypot(dx, dy)
-        self.sat = min(1.0, dist / radius)
-
-        angle_rad = math.atan2(dy, dx)
-        if angle_rad < 0:
-            angle_rad += 2 * math.pi
-
-        self.hue = angle_rad / (2 * math.pi)
+    def _pick(self, pos):
+        center, radius = self._geometry()
+        dx, dy = pos.x() - center.x(), center.y() - pos.y()
+        self.sat = min(1.0, math.hypot(dx, dy) / radius)
+        angle = math.atan2(dy, dx)
+        if angle < 0:
+            angle += 2 * math.pi
+        self.hue = angle / (2 * math.pi)
         self.current_color = QColor.fromHsvF(self.hue, self.sat, self.val)
         self.update()
         self.colorChanged.emit(self.current_color)
 
 
-# --- ОКНО ПАЛИТРЫ ---
-class ColorPickerWindow(QDialog):
+class ColorPickerWindow(FramelessCard):
     colorPicked = pyqtSignal(QColor)
 
-    def __init__(self, initial_color, parent=None):
-        super().__init__(parent)
-        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
-        self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(220, 260)
-
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-
-        bg_frame = QFrame(self)
-        bg_frame.setStyleSheet("""
-            QFrame {
-                background-color: #111118;
-                border-radius: 12px;
-                border: 1px solid #00ffc8;
-            }
-        """)
-        frame_layout = QVBoxLayout(bg_frame)
-        frame_layout.setAlignment(Qt.AlignCenter)
+    def __init__(self, initial_color: QColor, parent=None):
+        super().__init__((220, 260), radius=12, border_width=1, parent=parent)
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.body.setAlignment(Qt.AlignCenter)
 
         header = QHBoxLayout()
-        lbl = QLabel("ВЫБОР ЦВЕТА")
-        lbl.setStyleSheet("color: #00ffc8; font-size: 10px; font-weight: bold; border: none;")
-        btn_close = QPushButton("✕")
-        btn_close.setFixedSize(20, 20)
-        btn_close.setCursor(Qt.PointingHandCursor)
-        btn_close.setStyleSheet("color: #aaa; border: none; font-weight: bold;")
+        btn_close = make_button("✕", size=(20, 20),
+                                style="QPushButton { color: #aaa; border: none; font-weight: bold; }")
         btn_close.clicked.connect(self.close)
-
-        header.addWidget(lbl)
+        header.addWidget(caption("ВЫБОР ЦВЕТА", color=ACCENT))
         header.addStretch()
         header.addWidget(btn_close)
-        frame_layout.addLayout(header)
+        self.body.addLayout(header)
 
         self.wheel = ColorWheel()
-        self.wheel.set_color(initial_color)
-        self.wheel.colorChanged.connect(self.on_color_changed)
-        frame_layout.addWidget(self.wheel)
+        self.wheel.colorChanged.connect(self.colorPicked.emit)
+        self.body.addWidget(self.wheel)
 
         self.val_slider = ClickSlider(Qt.Horizontal)
         self.val_slider.setRange(0, 100)
-        self.val_slider.setValue(int(initial_color.valueF() * 100))
-        self.val_slider.setStyleSheet("""
-            QSlider::groove:horizontal { height: 6px; background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #000, stop:1 #fff); border-radius: 3px; }
-            QSlider::handle:horizontal { background: #fff; width: 12px; margin-top: -3px; margin-bottom: -3px; border-radius: 6px; }
-        """)
-        self.val_slider.valueChanged.connect(self.on_val_changed)
-        frame_layout.addWidget(self.val_slider)
+        self.val_slider.setStyleSheet(VALUE_SLIDER_STYLE)
+        self.val_slider.valueChanged.connect(self._on_value_changed)
+        self.body.addWidget(self.val_slider)
 
-        layout.addWidget(bg_frame)
+        self.set_color(initial_color)
 
-    def on_color_changed(self, color):
-        self.colorPicked.emit(color)
-
-    def on_val_changed(self, val):
-        self.wheel.set_value(val / 100.0)
+    def _on_value_changed(self, value: int):
+        self.wheel.set_value(value / 100.0)
         self.colorPicked.emit(self.wheel.current_color)
 
+    def set_color(self, color: QColor):
+        """Программная смена цвета — без сигналов, чтобы выбранный цвет не «плыл» от округлений."""
+        self.wheel.set_color(color)
+        self.val_slider.blockSignals(True)
+        self.val_slider.setValue(int(round(color.valueF() * 100)))
+        self.val_slider.blockSignals(False)
 
-# --- ДВИЖОК ОВЕРЛЕЯ С ПОДДЕРЖКОЙ ВСПЛЫВАЮЩЕЙ ПАНЕЛИ ЗАДАЧ ---
-WS_EX_TRANSPARENT = 0x00000020
-WS_EX_LAYERED     = 0x00080000
-WS_EX_NOACTIVATE  = 0x08000000
-WS_EX_TOOLWINDOW  = 0x00000080
-WS_EX_TOPMOST     = 0x00000008
-GWL_EXSTYLE       = -20
 
-HWND_TOPMOST  = -1
-SWP_NOSIZE    = 0x0001
-SWP_NOMOVE    = 0x0002
-SWP_NOACTIVATE = 0x0010
+class AutostartDialog(FramelessCard):
+    def __init__(self, parent=None):
+        super().__init__((320, 180), radius=16, border_width=2, parent=parent)
+        self.body.setContentsMargins(20, 20, 20, 20)
+        self.body.setSpacing(15)
 
+        title = QLabel("АВТОЗАПУСК")
+        title.setFont(QFont(FONT, 11, QFont.Bold))
+        title.setStyleSheet(f"color: {ACCENT};")
+        title.setAlignment(Qt.AlignCenter)
+
+        text = QLabel("Хотите ли вы добавить приложение\nв автозапуск Windows?")
+        text.setFont(QFont(FONT, 9))
+        text.setStyleSheet(f"color: {TEXT};")
+        text.setAlignment(Qt.AlignCenter)
+
+        btn_yes = make_button("ДА", height=32, font=QFont(FONT, 9, QFont.Bold), style=(
+            f"QPushButton {{ background: {ACCENT}; color: #000; border: none; border-radius: 8px; }}"
+            " QPushButton:hover { background: #00cc99; }"))
+        btn_no = make_button("НЕТ", height=32, font=QFont(FONT, 9, QFont.Bold), style=(
+            "QPushButton { background: #222233; color: #888; border: 1px solid #444455; border-radius: 8px; }"
+            " QPushButton:hover { background: #333344; color: #fff; }"))
+        btn_yes.clicked.connect(self.accept)
+        btn_no.clicked.connect(self.reject)
+
+        buttons = QHBoxLayout()
+        buttons.setSpacing(10)
+        buttons.addWidget(btn_yes)
+        buttons.addWidget(btn_no)
+
+        self.body.addWidget(title)
+        self.body.addWidget(text)
+        self.body.addLayout(buttons)
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Оверлей со шлейфом
+# ──────────────────────────────────────────────────────────────────────────────
 class MouseTrailOverlay(QWidget):
-    def __init__(self, fade_time=0.4, max_width=12, color1=QColor(0, 204, 255), color2=QColor(255, 0, 128)):
+    """Прозрачное «сквозное» окно на весь рабочий стол, в котором рисуется шлейф."""
+
+    MAX_POINTS = 400             # жёсткий лимит точек шлейфа
+    MAX_INTERP_STEPS = 80        # лимит промежуточных точек за один тик
+    FREEZE_GAP = 0.1             # пауза между тиками (с), после которой считаем, что система «подвисла»
+    FULL_REPAINT = False         # True — перерисовывать весь экран (если вдруг появятся артефакты)
+    KEEP_HEAD_WHEN_IDLE = False  # True — как в старой версии: «точка» остаётся под неподвижным курсором
+
+    def __init__(self, fade_time: float, max_width: int, color1: QColor, color2: QColor):
         super().__init__()
         self.fade_time = fade_time
         self.max_width = max_width
-        self.color1 = color1
-        self.color2 = color2
+        self.color1 = QColor(color1)
+        self.color2 = QColor(color2)
 
-        self.points = deque()
-        self.last_raw_pos = None
+        self.points = deque()  # (QPointF, момент создания)
+        self._last_pos = None
+        self._last_tick = time.monotonic()
+        self._dirty = QRect()  # где шлейф был нарисован в прошлый раз
 
-        # ИСПРАВЛЕНИЕ: Добавлен флаг Qt.WindowStaysOnTopHint
-        self.setWindowFlags(
-            Qt.FramelessWindowHint |
-            Qt.Tool |
-            Qt.WindowTransparentForInput |
-            Qt.WindowStaysOnTopHint
-        )
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowTransparentForInput
+                            | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        
-        desktop_rect = QApplication.desktop().geometry()
-        self.setGeometry(desktop_rect.x(), desktop_rect.y(), desktop_rect.width(), desktop_rect.height() - 2)
+        self.setAttribute(Qt.WA_ShowWithoutActivating, True)
+        self.setGeometry(self._desktop_rect())
 
-        self.refresh_rate = self.detect_max_refresh_rate()
-        timer_interval = max(1, int(1000 / self.refresh_rate))
+        self.refresh_rate = self._detect_refresh_rate()
+        interval = max(1, int(1000 / self.refresh_rate))
         self.step_distance = max(1.0, 3.0 * (60.0 / self.refresh_rate))
-
-        logging.info(f"Определена герцовка: {self.refresh_rate} Гц. Интервал таймера: {timer_interval} мс, Шаг точек: {self.step_distance:.2f} px")
+        log.info("Определена герцовка: %s Гц. Интервал таймера: %s мс", self.refresh_rate, interval)
 
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_trail)
-        self.timer.start(timer_interval)
+        self.timer.setTimerType(Qt.PreciseTimer)
+        self.timer.timeout.connect(self._tick)
+        self.timer.start(interval)
 
-    def detect_max_refresh_rate(self):
-        max_rate = 60.0
+    @staticmethod
+    def _desktop_rect() -> QRect:
+        rect = QRect()
+        for screen in QApplication.screens():
+            rect = rect.united(screen.geometry())
+        # -2 px: окно не должно выглядеть для Windows как полноэкранное приложение
+        rect.setHeight(rect.height() - 2)
+        return rect
+
+    @staticmethod
+    def _detect_refresh_rate() -> float:
         try:
-            screens = QApplication.screens()
-            for screen in screens:
-                rate = screen.refreshRate()
-                if rate > max_rate:
-                    max_rate = rate
-        except Exception as e:
-            logging.error(f"Ошибка определения герцовки: {e}")
-        return max_rate
+            return max([60.0] + [float(s.refreshRate()) for s in QApplication.screens()])
+        except Exception as e:  # noqa: BLE001
+            log.error("Ошибка определения герцовки: %s", e)
+            return 60.0
 
     def showEvent(self, event):
         super().showEvent(event)
+        if not IS_WINDOWS:
+            return
         try:
             hwnd = int(self.winId())
-            style = ctypes.windll.user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
-            
-            # ИСПРАВЛЕНИЕ: Добавлен флаг WS_EX_TOPMOST в стили Windows
-            ctypes.windll.user32.SetWindowLongW(
-                hwnd, 
-                GWL_EXSTYLE, 
-                style | WS_EX_TRANSPARENT | WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST
-            )
-            
-            ctypes.windll.user32.SetWindowPos(
-                hwnd, 
-                HWND_TOPMOST, 
-                0, 0, 0, 0, 
-                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE
-            )
-        except Exception as e:
-            logging.error(f"Ошибка стилей Windows: {e}")
+            style = _user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            _user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT | WS_EX_LAYERED
+                                   | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW)
+            _user32.SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE)
+        except Exception as e:  # noqa: BLE001
+            log.error("Ошибка стилей Windows: %s", e)
 
-    def set_colors_instant(self, c1, c2):
-        self.color1 = QColor(c1)
-        self.color2 = QColor(c2)
+    # ── управление ──────────────────────────────────────────────────────────
+    def set_colors(self, c1: QColor, c2: QColor):
+        self.color1, self.color2 = QColor(c1), QColor(c2)
         self.points.clear()
-        self.repaint()
+        self._dirty = QRect()
+        self.update()
 
-    def update_trail(self):
-        now = time.time()
-        pos = QCursor.pos()
-        
-        current_pt = QPointF(pos.x() - self.x(), pos.y() - self.y())
+    def shutdown(self):
+        self.timer.stop()
+        self.close()
+        self.deleteLater()
 
-        while self.points and (now - self.points[0][1]) > self.fade_time:
+    # ── логика шлейфа ───────────────────────────────────────────────────────
+    def _tick(self):
+        now = time.monotonic()
+        cur = QPointF(self.mapFromGlobal(QCursor.pos()))
+
+        # Защита от фризов (UAC, нагрузка на систему): не тянем линию через весь экран
+        if now - self._last_tick > self.FREEZE_GAP:
+            self._last_tick = now
+            self._last_pos = cur
+            self.points.clear()
+            self._invalidate()
+            return
+        self._last_tick = now
+
+        while self.points and now - self.points[0][1] > self.fade_time:
             self.points.popleft()
 
-        if self.last_raw_pos is not None:
-            dist = math.hypot(current_pt.x() - self.last_raw_pos.x(), current_pt.y() - self.last_raw_pos.y())
-            
+        last = self._last_pos
+        moved = last is None or cur != last
+        if moved and last is not None:
+            dist = math.hypot(cur.x() - last.x(), cur.y() - last.y())
             if dist > self.step_distance:
-                steps = int(dist / self.step_distance)
-                dx = (current_pt.x() - self.last_raw_pos.x()) / steps
-                dy = (current_pt.y() - self.last_raw_pos.y()) / steps
-                
-                for step in range(1, steps):
-                    interp_x = self.last_raw_pos.x() + dx * step
-                    interp_y = self.last_raw_pos.y() + dy * step
-                    self.points.append((QPointF(interp_x, interp_y), now))
+                steps = min(int(dist / self.step_distance), self.MAX_INTERP_STEPS)
+                dx, dy = (cur.x() - last.x()) / steps, (cur.y() - last.y()) / steps
+                for i in range(1, steps):
+                    self.points.append((QPointF(last.x() + dx * i, last.y() + dy * i), now))
+        if moved or self.KEEP_HEAD_WHEN_IDLE:
+            self.points.append((cur, now))
+        self._last_pos = cur
 
-        self.points.append((current_pt, now))
-        self.last_raw_pos = current_pt
+        while len(self.points) > self.MAX_POINTS:
+            self.points.popleft()
+        self._invalidate()
 
-        if self.points:
-            min_x = min(pt[0].x() for pt in self.points) - self.max_width
-            max_x = max(pt[0].x() for pt in self.points) + self.max_width
-            min_y = min(pt[0].y() for pt in self.points) - self.max_width
-            max_y = max(pt[0].y() for pt in self.points) + self.max_width
-            
-            rect = QRectF(min_x, min_y, max_x - min_x, max_y - min_y).toRect()
-            self.update(rect)
+    def _bounds(self) -> QRect:
+        if not self.points:
+            return QRect()
+        xs = [p.x() for p, _ in self.points]
+        ys = [p.y() for p, _ in self.points]
+        margin = int(self.max_width) + 3
+        left, top = int(min(xs)) - margin, int(min(ys)) - margin
+        return QRect(left, top, int(max(xs)) + margin + 1 - left, int(max(ys)) + margin + 1 - top)
+
+    def _invalidate(self):
+        """Перерисовываем только ту область, где шлейф был и где он теперь."""
+        if self.FULL_REPAINT:
+            self.update()
+            return
+        new = self._bounds()
+        region = new.united(self._dirty)
+        self._dirty = new
+        if not region.isNull():
+            self.update(region)
 
     def paintEvent(self, event):
-        num_points = len(self.points)
-        if num_points < 2:
+        p = QPainter(self)
+        # По-настоящему очищаем область (в режиме SourceOver заливка прозрачным ничего не делает)
+        p.setCompositionMode(QPainter.CompositionMode_Source)
+        p.fillRect(event.rect(), QColor(0, 0, 0, 0))
+        p.setCompositionMode(QPainter.CompositionMode_SourceOver)
+
+        points = self.points
+        if len(points) < 2:
             return
+        p.setRenderHint(QPainter.Antialiasing, True)
 
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
+        now = time.monotonic()
+        r1, g1, b1 = self.color1.red(), self.color1.green(), self.color1.blue()
+        r2, g2, b2 = self.color2.red(), self.color2.green(), self.color2.blue()
 
-        now = time.time()
-        c1_r, c1_g, c1_b = self.color1.red(), self.color1.green(), self.color1.blue()
-        c2_r, c2_g, c2_b = self.color2.red(), self.color2.green(), self.color2.blue()
+        pen = QPen()
+        pen.setCapStyle(Qt.RoundCap)
+        pen.setJoinStyle(Qt.RoundJoin)
+        color = QColor()
 
-        for i in range(num_points - 1):
-            p1, t1 = self.points[i]
-            p2, _ = self.points[i + 1]
+        for i in range(len(points) - 1):
+            p1, t1 = points[i]
+            p2 = points[i + 1][0]
 
-            progress = 1.0 - ((now - t1) / self.fade_time)
+            progress = max(0.0, min(1.0, 1.0 - (now - t1) / self.fade_time))
             if progress < 0.01:
                 continue
-            if progress > 1.0:
-                progress = 1.0
 
-            alpha = int(255 * (progress ** 1.5))
-            width = max(1.0, self.max_width * progress)
-
-            r = int(c2_r + (c1_r - c2_r) * progress)
-            g = int(c2_g + (c1_g - c2_g) * progress)
-            b = int(c2_b + (c1_b - c2_b) * progress)
-
-            pen = QPen(QColor(r, g, b, alpha), width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-            painter.setPen(pen)
-            painter.drawLine(p1, p2)
+            color.setRgb(int(r2 + (r1 - r2) * progress),
+                         int(g2 + (g1 - g2) * progress),
+                         int(b2 + (b1 - b2) * progress),
+                         int(255 * progress ** 1.5))
+            pen.setColor(color)
+            pen.setWidthF(max(1.0, self.max_width * progress))
+            p.setPen(pen)
+            p.drawLine(p1, p2)
 
 
-# --- ФОНОВЫЙ КОНТЕЙНЕР ---
-class StarryBackgroundFrame(QFrame):
+# ──────────────────────────────────────────────────────────────────────────────
+#  Фон панели
+# ──────────────────────────────────────────────────────────────────────────────
+class Star:
+    __slots__ = ("x", "y", "size", "alpha", "speed", "delta")
+
+    def __init__(self):
+        self.x = random.random()                 # координаты — доли от размера панели
+        self.y = random.random()
+        self.size = random.uniform(1.0, 2.5)
+        self.alpha = random.randint(50, 255)
+        self.speed = random.uniform(0.2, 0.6) / 450.0
+        self.delta = random.choice((-2, -1, 1, 2))
+
+
+class StarryBackground(QFrame):
+    """Тёмная скруглённая панель с мерцающими звёздами. Анимация идёт только пока окно видно."""
+
+    RADIUS = 20
+    STAR_COUNT = 100
+
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.stars = []
-        self.init_stars()
-
+        self.stars = [Star() for _ in range(self.STAR_COUNT)]
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.animate_stars)
+        self.timer.timeout.connect(self._animate)
+
+    def showEvent(self, event):
+        super().showEvent(event)
         self.timer.start(30)
 
-    def init_stars(self):
-        for _ in range(100):
-            self.stars.append({
-                'x': random.randint(0, 400),
-                'y': random.randint(0, 500),
-                'size': random.uniform(1.0, 2.5),
-                'alpha': random.randint(50, 255),
-                'speed': random.uniform(0.2, 0.6),
-                'delta': random.choice([-2, -1, 1, 2])
-            })
+    def hideEvent(self, event):
+        super().hideEvent(event)
+        self.timer.stop()  # свёрнуты в трей — не тратим CPU
 
-    def animate_stars(self):
-        for star in self.stars:
-            star['y'] -= star['speed']
-            if star['y'] < 0:
-                star['y'] = 500
-                star['x'] = random.randint(0, 400)
-
-            star['alpha'] += star['delta']
-            if star['alpha'] >= 255 or star['alpha'] <= 40:
-                star['delta'] *= -1
-
+    def _animate(self):
+        for s in self.stars:
+            s.y -= s.speed
+            if s.y < 0:
+                s.y, s.x = 1.0, random.random()
+            s.alpha += s.delta
+            if s.alpha >= 255 or s.alpha <= 40:
+                s.delta = -s.delta
         self.update()
 
     def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.fillRect(self.rect(), QColor("#111118"))
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing, True)
 
-        for star in self.stars:
-            color = QColor(255, 255, 255, max(0, min(255, star['alpha'])))
-            painter.setPen(Qt.NoPen)
-            painter.setBrush(color)
-            painter.drawEllipse(QPointF(star['x'], star['y']), star['size'], star['size'])
+        shape = QPainterPath()
+        shape.addRoundedRect(QRectF(self.rect()).adjusted(0.5, 0.5, -0.5, -0.5), self.RADIUS, self.RADIUS)
+        p.setClipPath(shape)
+        p.fillPath(shape, QColor(BG))
+
+        w, h = self.width(), self.height()
+        p.setPen(Qt.NoPen)
+        for s in self.stars:
+            p.setBrush(QColor(255, 255, 255, max(0, min(255, s.alpha))))
+            p.drawEllipse(QPointF(s.x * w, s.y * h), s.size, s.size)
+
+        p.setClipping(False)
+        p.setBrush(Qt.NoBrush)
+        p.setPen(QPen(QColor(BORDER), 1))
+        p.drawPath(shape)
 
 
-# --- ГЛАВНАЯ ПАНЕЛЬ ---
-class ModernControlPanel(QWidget):
+# ──────────────────────────────────────────────────────────────────────────────
+#  Главная панель
+# ──────────────────────────────────────────────────────────────────────────────
+class ControlPanel(QWidget):
+    WIDTH, HEIGHT = 380, 450
+
+    QUICK_COLORS = ("#ff0055", "#ff6600", "#ffcc00", "#00ffc8", "#00ccff", "#0055ff", "#9d00ff", "#ffffff")
+    PRESETS = (
+        ("#00ccff", "#ff0080"),
+        ("#9d00ff", "#00fff0"),
+        ("#ff6600", "#ff0000"),
+        ("#00ff00", "#003300"),
+        ("#ff00ff", "#4b0082"),
+    )
+
     def __init__(self):
         super().__init__()
-        logging.info("Инициализация интерфейса")
+        log.info("Инициализация интерфейса")
+        self.picker = None
         self.overlay = None
-        self.drag_position = QPoint()
-
-        self.selected_c1 = QColor(0, 204, 255)
-        self.selected_c2 = QColor(255, 0, 128)
-        self.active_slot = 1
-        self.fade_time = 0.4
-        self.max_width = 12
-        self.autostart_asked = False
-        self.autostart_enabled = False
-        
-        self.custom_history = []
+        self.act_autostart = None
+        self.active = 0  # какой цвет редактируем: 0 — основной, 1 — дополнительный
         self.history_buttons = []
-        self.picker_dialog = None
+        self._quitting = False
+        self._tray_hint_shown = False
 
-        self.load_config()
-        self.init_ui()
-        self.init_tray()
-        
-        QTimer.singleShot(300, self.check_autostart_prompt)
+        self.settings = Settings.load(CONFIG_FILE)
 
-    def load_config(self):
-        if os.path.exists(CONFIG_FILE):
-            try:
-                with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                    cfg = json.load(f)
-                    self.selected_c1 = QColor(cfg.get('color1', '#00ccff'))
-                    self.selected_c2 = QColor(cfg.get('color2', '#ff0080'))
-                    self.max_width = cfg.get('max_width', 12)
-                    self.fade_time = cfg.get('fade_time', 0.4)
-                    self.autostart_asked = cfg.get('autostart_asked', False)
-                    self.autostart_enabled = cfg.get('autostart_enabled', False)
-                    
-                    hist_data = cfg.get('history', [])
-                    self.custom_history = [(QColor(h[0]), QColor(h[1])) for h in hist_data]
-                    logging.info("Конфигурация успешно загружена")
-            except Exception as e:
-                logging.error(f"Ошибка загрузки конфигурации: {e}")
+        # Слайдеры дёргают сохранение на каждый пиксель — склеиваем записи в одну
+        self._save_timer = QTimer(self)
+        self._save_timer.setSingleShot(True)
+        self._save_timer.setInterval(400)
+        self._save_timer.timeout.connect(self._save_now)
 
-    def save_config(self):
-        try:
-            cfg = {
-                'color1': self.selected_c1.name(),
-                'color2': self.selected_c2.name(),
-                'max_width': self.max_width,
-                'fade_time': self.fade_time,
-                'autostart_asked': self.autostart_asked,
-                'autostart_enabled': self.autostart_enabled,
-                'history': [[c1.name(), c2.name()] for c1, c2 in self.custom_history]
-            }
-            with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-                json.dump(cfg, f, indent=4)
-            logging.info("Конфигурация успешно сохранена")
-        except Exception as e:
-            logging.error(f"Ошибка сохранения конфигурации: {e}")
+        self._build_ui()
+        self._build_tray()
+        QTimer.singleShot(300, self._maybe_ask_autostart)
 
-    def check_autostart_prompt(self):
-        if not self.autostart_asked:
-            dialog = AutostartDialog(self)
-            dialog.move(
-                self.x() + (self.width() - dialog.width()) // 2,
-                self.y() + (self.height() - dialog.height()) // 2
-            )
-            
-            if dialog.exec_() == QDialog.Accepted:
-                self.autostart_enabled = True
-                set_autostart(True)
-            else:
-                self.autostart_enabled = False
-                set_autostart(False)
-                
-            self.autostart_asked = True
-            self.save_config()
+    # ── сохранение ──────────────────────────────────────────────────────────
+    def schedule_save(self):
+        self._save_timer.start()
 
-    def init_ui(self):
+    def _save_now(self):
+        self._save_timer.stop()
+        self.settings.save(CONFIG_FILE)
+
+    # ── построение интерфейса ───────────────────────────────────────────────
+    def _build_ui(self):
+        s = self.settings
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
-        self.setFixedSize(380, 450)
-        self.setWindowIcon(create_tray_icon())
+        self.setFixedSize(self.WIDTH, self.HEIGHT)
+        self.setWindowTitle(APP_TITLE)
+        self.setWindowIcon(app_icon())
 
-        self.container = StarryBackgroundFrame(self)
-        self.container.setGeometry(0, 0, 380, 450)
-        self.container.setStyleSheet("""
-            StarryBackgroundFrame {
-                border-radius: 20px;
-                border: 1px solid #222233;
-            }
-        """)
-
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(25)
-        shadow.setColor(QColor(0, 204, 255, 50))
-        shadow.setOffset(0, 0)
-        self.container.setGraphicsEffect(shadow)
-
-        self.left_layout = QVBoxLayout(self.container)
-        self.left_layout.setContentsMargins(20, 20, 20, 20)
-        self.left_layout.setSpacing(8)
+        container = StarryBackground(self)
+        container.setGeometry(0, 0, self.WIDTH, self.HEIGHT)
+        root = QVBoxLayout(container)
+        root.setContentsMargins(20, 20, 20, 20)
+        root.setSpacing(8)
 
         # Шапка
-        self.header_frame = QFrame()
-        self.header_frame.setStyleSheet("background: transparent; border: none;")
-        header_layout = QHBoxLayout(self.header_frame)
+        header = DragHeader()
+        header_layout = QHBoxLayout(header)
         header_layout.setContentsMargins(0, 0, 0, 0)
-
-        title = QLabel("CCC|CoolColorCursor")
-        title.setFont(QFont("Segoe UI", 11, QFont.Bold))
-        title.setStyleSheet("color: #00ffc8;")
-
-        btn_box = QHBoxLayout()
-        btn_box.setSpacing(6)
-
-        btn_minimize = QPushButton("─")
-        btn_minimize.setFont(QFont("Segoe UI Symbol", 9, QFont.Bold))
-        btn_minimize.setFixedSize(24, 24)
-        btn_minimize.setCursor(Qt.PointingHandCursor)
-        btn_minimize.setStyleSheet("""
-            QPushButton { background: transparent; color: #777; border: none; }
-            QPushButton:hover { color: #00ffc8; }
-        """)
-        btn_minimize.clicked.connect(self.hide_to_tray)
-
-        btn_close = QPushButton("✕")
-        btn_close.setFont(QFont("Segoe UI Symbol", 10, QFont.Bold))
-        btn_close.setFixedSize(24, 24)
-        btn_close.setCursor(Qt.PointingHandCursor)
-        btn_close.setStyleSheet("""
-            QPushButton { background: transparent; color: #777; border: none; }
-            QPushButton:hover { color: #ff0055; }
-        """)
-        btn_close.clicked.connect(self.close_application)
-
-        btn_box.addWidget(btn_minimize)
-        btn_box.addWidget(btn_close)
-
+        title = QLabel(APP_TITLE)
+        title.setFont(QFont(FONT, 11, QFont.Bold))
+        title.setStyleSheet(f"color: {ACCENT}; background: transparent;")
         header_layout.addWidget(title)
         header_layout.addStretch()
-        header_layout.addLayout(btn_box)
-        self.left_layout.addWidget(self.header_frame)
-
-        self.header_frame.mousePressEvent = self.header_press
-        self.header_frame.mouseMoveEvent = self.header_move
+        header_layout.addWidget(self._window_button("─", 9, ACCENT, self.hide_to_tray))
+        header_layout.addWidget(self._window_button("✕", 10, DANGER, self.quit_app))
+        root.addWidget(header)
 
         # Слайдеры
-        self.lbl_width = QLabel(f"ТОЛЩИНА: {self.max_width} px")
-        self.lbl_width.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold; background: transparent;")
-        self.left_layout.addWidget(self.lbl_width)
+        self.lbl_width = caption(f"ТОЛЩИНА: {s.max_width} px")
+        root.addWidget(self.lbl_width)
+        root.addWidget(self._make_slider(2, 50, s.max_width, self.change_width))
 
-        slider_w = ClickSlider(Qt.Horizontal)
-        slider_w.setRange(2, 50)
-        slider_w.setValue(self.max_width)
-        slider_w.setTracking(True)
-        slider_w.setStyleSheet(self.get_slider_style())
-        slider_w.valueChanged.connect(self.change_width)
-        self.left_layout.addWidget(slider_w)
-
-        self.lbl_fade = QLabel(f"СКОРОСТЬ ИСЧЕЗНОВЕНИЯ: {int(self.fade_time * 1000)} мс")
-        self.lbl_fade.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold; background: transparent;")
-        self.left_layout.addWidget(self.lbl_fade)
-
-        slider_f = ClickSlider(Qt.Horizontal)
-        slider_f.setRange(100, 1500)
-        slider_f.setValue(int(self.fade_time * 1000))
-        slider_f.setTracking(True)
-        slider_f.setStyleSheet(self.get_slider_style())
-        slider_f.valueChanged.connect(self.change_fade)
-        self.left_layout.addWidget(slider_f)
+        self.lbl_fade = caption(f"СКОРОСТЬ ИСЧЕЗНОВЕНИЯ: {s.fade_ms} мс")
+        root.addWidget(self.lbl_fade)
+        root.addWidget(self._make_slider(100, 1500, s.fade_ms, self.change_fade))
 
         # Выбор цвета
-        lbl_colors = QLabel("ВЫБОР И НАСТРОЙКА ЦВЕТА")
-        lbl_colors.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold; background: transparent;")
-        self.left_layout.addWidget(lbl_colors)
+        root.addWidget(caption("ВЫБОР И НАСТРОЙКА ЦВЕТА"))
 
-        colors_layout = QHBoxLayout()
-        self.btn_c1 = QPushButton("Основной")
-        self.btn_c2 = QPushButton("Дополнительный")
-        for b in (self.btn_c1, self.btn_c2):
-            b.setFixedHeight(28)
-            b.setFont(QFont("Segoe UI", 9))
-            b.setCursor(Qt.PointingHandCursor)
+        slots = QHBoxLayout()
+        self.btn_c1 = make_button("Основной", height=28, font=QFont(FONT, 9))
+        self.btn_c2 = make_button("Дополнительный", height=28, font=QFont(FONT, 9))
+        self.btn_c1.clicked.connect(lambda: self.set_active_slot(0))
+        self.btn_c2.clicked.connect(lambda: self.set_active_slot(1))
+        slots.addWidget(self.btn_c1)
+        slots.addWidget(self.btn_c2)
+        root.addLayout(slots)
 
-        self.btn_c1.clicked.connect(lambda: self.set_active_slot(1))
-        self.btn_c2.clicked.connect(lambda: self.set_active_slot(2))
-        colors_layout.addWidget(self.btn_c1)
-        colors_layout.addWidget(self.btn_c2)
-        self.left_layout.addLayout(colors_layout)
+        quick = QHBoxLayout()
+        for hex_code in self.QUICK_COLORS:
+            btn = make_button(size=(26, 22), style=f"background-color: {hex_code};"
+                                                   " border-radius: 4px; border: 1px solid #333;")
+            btn.clicked.connect(lambda _=False, c=hex_code: self.pick_quick_color(c))
+            quick.addWidget(btn)
+        self.btn_arrow = make_button("▶", size=(26, 22), style=(
+            f"QPushButton {{ background: rgba(0, 255, 200, 0.15); color: {ACCENT}; border: 1px solid {ACCENT};"
+            " border-radius: 4px; font-size: 11px; font-weight: bold; }"
+            f" QPushButton:hover {{ background: {ACCENT}; color: #000; }}"))
+        self.btn_arrow.clicked.connect(self.toggle_picker)
+        quick.addWidget(self.btn_arrow)
+        root.addLayout(quick)
 
-        # Палитра
-        picker_layout = QHBoxLayout()
-        palette = [
-            "#ff0055", "#ff6600", "#ffcc00", "#00ffc8", 
-            "#00ccff", "#0055ff", "#9d00ff", "#ffffff"
-        ]
-        for hex_code in palette:
-            p_btn = QPushButton()
-            p_btn.setFixedSize(26, 22)
-            p_btn.setCursor(Qt.PointingHandCursor)
-            p_btn.setStyleSheet(f"background-color: {hex_code}; border-radius: 4px; border: 1px solid #333;")
-            p_btn.clicked.connect(lambda _, c=hex_code: self.pick_inline_color(c))
-            picker_layout.addWidget(p_btn)
-        
-        self.btn_arrow = QPushButton("▶")
-        self.btn_arrow.setFixedSize(26, 22)
-        self.btn_arrow.setCursor(Qt.PointingHandCursor)
-        self.btn_arrow.setStyleSheet("""
-            QPushButton {
-                background: rgba(0, 255, 200, 0.15); 
-                color: #00ffc8; 
-                border: 1px solid #00ffc8; 
-                border-radius: 4px; 
-                font-size: 11px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background: #00ffc8;
-                color: #000;
-            }
-        """)
-        self.btn_arrow.clicked.connect(self.toggle_color_picker_window)
-        picker_layout.addWidget(self.btn_arrow)
-
-        self.left_layout.addLayout(picker_layout)
-
-        # Кнопка применения
-        self.btn_apply = QPushButton("✦ ПРИМЕНИТЬ ЦВЕТА")
-        self.btn_apply.setFixedHeight(36)
-        self.btn_apply.setFont(QFont("Segoe UI Symbol", 9, QFont.Bold))
-        self.btn_apply.setCursor(Qt.PointingHandCursor)
-        self.btn_apply.setStyleSheet("""
-            QPushButton {
-                background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a1b26, stop:1 #12131c);
-                color: #00ffc8;
-                border: 2px solid #00ffc8;
-                border-radius: 18px;
-            }
-            QPushButton:hover {
-                background: #00ffc8;
-                color: #000000;
-            }
-        """)
-        self.btn_apply.clicked.connect(self.apply_colors)
-        self.left_layout.addWidget(self.btn_apply)
+        btn_apply = make_button("✦ ПРИМЕНИТЬ ЦВЕТА", height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
+                                style=outline_button_style(ACCENT))
+        btn_apply.clicked.connect(self.apply_colors)
+        root.addWidget(btn_apply)
 
         # История
-        lbl_hist = QLabel("ИСТОРИЯ ВАШИХ ЦВЕТОВ")
-        lbl_hist.setStyleSheet("color: #666; font-size: 9px; font-weight: bold; background: transparent;")
-        self.left_layout.addWidget(lbl_hist)
-
-        hist_layout = QHBoxLayout()
-        for i in range(5):
-            btn = QPushButton()
-            btn.setFixedSize(56, 22)
-            btn.setCursor(Qt.PointingHandCursor)
-            btn.setStyleSheet("background: rgba(24, 24, 34, 0.7); border: 1px dashed #333; border-radius: 6px;")
-            btn.setEnabled(False)
-            btn.clicked.connect(lambda _, idx=i: self.apply_history_color(idx))
-            hist_layout.addWidget(btn)
+        root.addWidget(caption("ИСТОРИЯ ВАШИХ ЦВЕТОВ", size=9, color=DIM))
+        history = QHBoxLayout()
+        for i in range(HISTORY_SIZE):
+            btn = make_button(size=(56, 22))
+            btn.clicked.connect(lambda _=False, idx=i: self.apply_history(idx))
+            history.addWidget(btn)
             self.history_buttons.append(btn)
-        self.left_layout.addLayout(hist_layout)
+        root.addLayout(history)
 
         # Пресеты
-        lbl_presets = QLabel("ГОТОВЫЕ ПРЕСЕТЫ")
-        lbl_presets.setStyleSheet("color: #aaa; font-size: 10px; font-weight: bold; background: transparent;")
-        self.left_layout.addWidget(lbl_presets)
+        root.addWidget(caption("ГОТОВЫЕ ПРЕСЕТЫ"))
+        presets = QHBoxLayout()
+        for c1, c2 in self.PRESETS:
+            btn = make_button(size=(56, 22), style=gradient_button_style(c1, c2))
+            btn.clicked.connect(lambda _=False, a=c1, b=c2: self.apply_preset(a, b))
+            presets.addWidget(btn)
+        root.addLayout(presets)
 
-        presets_layout = QHBoxLayout()
-        presets = [
-            (QColor(0, 204, 255), QColor(255, 0, 128)),
-            (QColor(157, 0, 255), QColor(0, 255, 240)),
-            (QColor(255, 102, 0), QColor(255, 0, 0)),
-            (QColor(0, 255, 0), QColor(0, 51, 0)),
-            (QColor(255, 0, 255), QColor(75, 0, 130))
-        ]
+        root.addStretch()
 
-        for c1, c2 in presets:
-            p_btn = QPushButton()
-            p_btn.setFixedSize(56, 22)
-            p_btn.setCursor(Qt.PointingHandCursor)
-            p_btn.setStyleSheet(f"""
-                QPushButton {{
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c1.name()}, stop:1 {c2.name()});
-                    border: 1px solid #333;
-                    border-radius: 6px;
-                }}
-                QPushButton:hover {{ border: 1px solid #ffffff; }}
-            """)
-            p_btn.clicked.connect(lambda _, color1=c1, color2=c2: self.quick_preset_apply(color1, color2))
-            presets_layout.addWidget(p_btn)
-        self.left_layout.addLayout(presets_layout)
-
-        self.left_layout.addStretch()
-
-        # Кнопка переключения
-        self.btn_toggle = QPushButton("▶ ВКЛЮЧИТЬ ЭФФЕКТ")
-        self.btn_toggle.setFixedHeight(36)
-        self.btn_toggle.setFont(QFont("Segoe UI Symbol", 9, QFont.Bold))
-        self.btn_toggle.setCursor(Qt.PointingHandCursor)
+        self.btn_toggle = make_button(height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
         self.btn_toggle.clicked.connect(self.toggle_trail)
-        self.left_layout.addWidget(self.btn_toggle)
+        root.addWidget(self.btn_toggle)
 
-        self.update_toggle_button_style(is_active=False)
-        self.update_buttons_ui()
-        self.update_history_ui()
+        self._refresh_toggle_ui()
+        self._refresh_color_buttons()
+        self._refresh_history_ui()
 
-    def init_tray(self):
-        self.tray_icon = QSystemTrayIcon(self)
-        self.tray_icon.setIcon(create_tray_icon())
-        self.tray_icon.setToolTip("CCC|CoolColorCursor")
+    @staticmethod
+    def _window_button(text, font_size, hover_color, slot) -> QPushButton:
+        btn = make_button(text, size=(24, 24), font=QFont(FONT_SYMBOL, font_size, QFont.Bold), style=(
+            "QPushButton { background: transparent; color: #777; border: none; }"
+            f" QPushButton:hover {{ color: {hover_color}; }}"))
+        btn.clicked.connect(slot)
+        return btn
 
-        tray_menu = QMenu()
-        tray_menu.setStyleSheet("""
-            QMenu {
-                background-color: #111118;
-                color: #ffffff;
-                border: 1px solid #00ffc8;
-                border-radius: 8px;
-                padding: 4px;
-            }
-            QMenu::item {
-                padding: 6px 20px;
-                border-radius: 4px;
-            }
-            QMenu::item:selected {
-                background-color: #00ffc8;
-                color: #000000;
-            }
-        """)
+    @staticmethod
+    def _make_slider(lo, hi, value, on_change) -> ClickSlider:
+        slider = ClickSlider(Qt.Horizontal)
+        slider.setRange(lo, hi)
+        slider.setValue(value)
+        slider.setStyleSheet(SLIDER_STYLE)
+        slider.valueChanged.connect(on_change)
+        return slider
 
-        self.action_show = QAction("Открыть настройки", self)
-        self.action_show.triggered.connect(self.show_from_tray)
-        tray_menu.addAction(self.action_show)
+    # ── трей ────────────────────────────────────────────────────────────────
+    def _build_tray(self):
+        self.tray = QSystemTrayIcon(app_icon(), self)
+        self.tray.setToolTip(APP_TITLE)
 
-        self.action_toggle = QAction("Включить эффект", self)
-        self.action_toggle.triggered.connect(self.toggle_trail)
-        tray_menu.addAction(self.action_toggle)
+        menu = QMenu()
+        menu.setStyleSheet(
+            f"QMenu {{ background-color: {BG}; color: #fff; border: 1px solid {ACCENT};"
+            " border-radius: 8px; padding: 4px; }"
+            " QMenu::item { padding: 6px 20px; border-radius: 4px; }"
+            f" QMenu::item:selected {{ background-color: {ACCENT}; color: #000; }}")
 
-        tray_menu.addSeparator()
+        menu.addAction("Открыть настройки").triggered.connect(self.show_from_tray)
+        self.act_toggle = menu.addAction("Включить эффект")
+        self.act_toggle.triggered.connect(self.toggle_trail)
 
-        action_quit = QAction("Выход", self)
-        action_quit.triggered.connect(self.close_application)
-        tray_menu.addAction(action_quit)
+        if IS_WINDOWS:
+            self.act_autostart = menu.addAction("Запускать вместе с Windows")
+            self.act_autostart.setCheckable(True)
+            self.act_autostart.setChecked(self.settings.autostart_enabled)
+            self.act_autostart.toggled.connect(self._on_autostart_toggled)
 
-        self.tray_icon.setContextMenu(tray_menu)
-        self.tray_icon.activated.connect(self.on_tray_icon_activated)
-        self.tray_icon.show()
+        menu.addSeparator()
+        menu.addAction("Выход").triggered.connect(self.quit_app)
 
-    def on_tray_icon_activated(self, reason):
+        self._tray_menu = menu  # у меню нет родителя — держим ссылку, иначе его соберёт GC
+        self.tray.setContextMenu(menu)
+        self.tray.activated.connect(self._on_tray_activated)
+        self.tray.show()
+
+    def _on_tray_activated(self, reason):
+        # Реагируем только на левый клик; правый открывает меню и окно показывать не должен
         if reason == QSystemTrayIcon.Trigger:
             if self.isVisible():
                 self.hide_to_tray()
@@ -954,212 +1001,218 @@ class ModernControlPanel(QWidget):
                 self.show_from_tray()
 
     def hide_to_tray(self):
-        if self.picker_dialog:
-            self.picker_dialog.close()
+        if self.picker:
+            self.picker.close()
         self.hide()
-        self.tray_icon.showMessage(
-            "CCC|CoolColorCursor",
-            "Приложение свернуто в трей.",
-            create_tray_icon(),
-            1500
-        )
+        if not self._tray_hint_shown:
+            self._tray_hint_shown = True
+            self.tray.showMessage(APP_TITLE, "Приложение свернуто в трей.", app_icon(), 1500)
 
     def show_from_tray(self):
         self.show()
+        self.raise_()
         self.activateWindow()
 
-    def close_application(self):
-        logging.info("Завершение работы приложения")
-        self.save_config()
-        self.tray_icon.hide()
+    def quit_app(self):
+        log.info("Завершение работы приложения")
+        self._quitting = True
+        self._save_now()
+        if self.overlay:
+            self.overlay.shutdown()
+            self.overlay = None
+        self.tray.hide()
         QApplication.quit()
 
-    def toggle_color_picker_window(self):
-        if self.picker_dialog and self.picker_dialog.isVisible():
-            self.picker_dialog.close()
-            self.btn_arrow.setText("▶")
+    def closeEvent(self, event):
+        if self._quitting:
+            event.accept()
+        else:  # Alt+F4 не должен убивать приложение — сворачиваем в трей
+            event.ignore()
+            self.hide_to_tray()
+
+    # ── автозапуск ──────────────────────────────────────────────────────────
+    def _set_autostart_check(self, checked: bool):
+        if self.act_autostart:
+            self.act_autostart.blockSignals(True)
+            self.act_autostart.setChecked(checked)
+            self.act_autostart.blockSignals(False)
+
+    def _maybe_ask_autostart(self):
+        if not IS_WINDOWS or self.settings.autostart_asked:
+            return
+        dialog = AutostartDialog(self)
+        dialog.move(self.geometry().center() - dialog.rect().center())
+        wanted = dialog.exec_() == QDialog.Accepted
+        dialog.deleteLater()
+
+        enabled = set_autostart(wanted) and wanted
+        self.settings.autostart_enabled = enabled
+        self.settings.autostart_asked = True
+        self._set_autostart_check(enabled)
+        self.schedule_save()
+
+    def _on_autostart_toggled(self, checked: bool):
+        if not set_autostart(checked):
+            self._set_autostart_check(not checked)  # не получилось — возвращаем галочку
+            return
+        self.settings.autostart_enabled = checked
+        self.settings.autostart_asked = True
+        self.schedule_save()
+
+    # ── окно выбора цвета ───────────────────────────────────────────────────
+    def toggle_picker(self):
+        if self.picker:
+            self.picker.close()
             return
 
-        current = self.selected_c1 if self.active_slot == 1 else self.selected_c2
-        self.picker_dialog = ColorPickerWindow(current, self)
-        
-        pos = self.mapToGlobal(QPoint(self.width() + 10, 0))
-        self.picker_dialog.move(pos)
-        self.picker_dialog.colorPicked.connect(self.on_window_color_changed)
-        
+        self.picker = ColorPickerWindow(self.settings.colors[self.active], self)
+        self.picker.colorPicked.connect(self.on_picker_color)
+        self.picker.finished.connect(self._on_picker_closed)
         self.btn_arrow.setText("◀")
-        self.picker_dialog.finished.connect(lambda: self.btn_arrow.setText("▶"))
-        self.picker_dialog.show()
+        self._place_picker()
+        self.picker.show()
 
-    def update_picker_position(self):
-        if self.picker_dialog and self.picker_dialog.isVisible():
-            pos = self.mapToGlobal(QPoint(self.width() + 10, 0))
-            self.picker_dialog.move(pos)
+    def _on_picker_closed(self):
+        self.picker = None
+        self.btn_arrow.setText("▶")
 
-    def on_window_color_changed(self, color):
-        if self.active_slot == 1:
-            self.selected_c1 = color
-        else:
-            self.selected_c2 = color
-        self.update_buttons_ui()
+    def _place_picker(self):
+        if not self.picker:
+            return
+        frame = self.frameGeometry()
+        screen = QApplication.screenAt(frame.center()) or QApplication.primaryScreen()
+        area = screen.availableGeometry()
 
-    def update_toggle_button_style(self, is_active):
-        if is_active:
-            self.btn_toggle.setText("⏹ ВЫКЛЮЧИТЬ ЭФФЕКТ")
-            self.btn_toggle.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a1b26, stop:1 #12131c);
-                    color: #ff0055;
-                    border: 2px solid #ff0055;
-                    border-radius: 18px;
-                }
-                QPushButton:hover {
-                    background: #ff0055;
-                    color: #ffffff;
-                }
-            """)
-            if hasattr(self, 'action_toggle'):
-                self.action_toggle.setText("Выключить эффект")
-        else:
-            self.btn_toggle.setText("▶ ВКЛЮЧИТЬ ЭФФЕКТ")
-            self.btn_toggle.setStyleSheet("""
-                QPushButton {
-                    background: qlineargradient(x1:0, y1:0, x2:1, y2:1, stop:0 #1a1b26, stop:1 #12131c);
-                    color: #00ffc8;
-                    border: 2px solid #00ffc8;
-                    border-radius: 18px;
-                }
-                QPushButton:hover {
-                    background: #00ffc8;
-                    color: #000000;
-                }
-            """)
-            if hasattr(self, 'action_toggle'):
-                self.action_toggle.setText("Включить эффект")
+        x = frame.right() + 10
+        if x + self.picker.width() > area.right():  # справа нет места — ставим слева
+            x = frame.left() - self.picker.width() - 10
+        y = max(area.top(), min(frame.top(), area.bottom() - self.picker.height()))
+        self.picker.move(x, y)
 
-    def header_press(self, event):
-        if event.button() == Qt.LeftButton:
-            self.drag_position = event.globalPos() - self.frameGeometry().topLeft()
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self._place_picker()
 
-    def header_move(self, event):
-        if event.buttons() == Qt.LeftButton:
-            self.move(event.globalPos() - self.drag_position)
-            self.update_picker_position()
+    def _sync_picker(self):
+        if self.picker:
+            self.picker.set_color(self.settings.colors[self.active])
 
-    def set_active_slot(self, slot):
-        self.active_slot = slot
-        if self.picker_dialog and self.picker_dialog.isVisible():
-            current = self.selected_c1 if slot == 1 else self.selected_c2
-            self.picker_dialog.wheel.set_color(current)
-            self.picker_dialog.val_slider.setValue(int(current.valueF() * 100))
-        self.update_buttons_ui()
+    def on_picker_color(self, color: QColor):
+        self.settings.colors[self.active] = QColor(color)
+        self._refresh_color_buttons()
 
-    def pick_inline_color(self, hex_code):
-        color = QColor(hex_code)
-        if self.active_slot == 1:
-            self.selected_c1 = color
-        else:
-            self.selected_c2 = color
-        if self.picker_dialog and self.picker_dialog.isVisible():
-            self.picker_dialog.wheel.set_color(color)
-            self.picker_dialog.val_slider.setValue(int(color.valueF() * 100))
-        self.update_buttons_ui()
+    # ── цвета ───────────────────────────────────────────────────────────────
+    def set_active_slot(self, slot: int):
+        self.active = slot
+        self._sync_picker()
+        self._refresh_color_buttons()
 
-    def update_buttons_ui(self):
-        b1_border = "2px solid #00ffc8" if self.active_slot == 1 else "1px solid #333"
-        b2_border = "2px solid #00ffc8" if self.active_slot == 2 else "1px solid #333"
-
-        self.btn_c1.setStyleSheet(f"background-color: {self.selected_c1.name()}; color: #fff; border-radius: 6px; font-weight: bold; border: {b1_border};")
-        self.btn_c2.setStyleSheet(f"background-color: {self.selected_c2.name()}; color: #fff; border-radius: 6px; font-weight: bold; border: {b2_border};")
+    def pick_quick_color(self, hex_code: str):
+        self.settings.colors[self.active] = QColor(hex_code)
+        self._sync_picker()
+        self._refresh_color_buttons()
 
     def apply_colors(self):
-        logging.info(f"Применены цвета: C1={self.selected_c1.name()}, C2={self.selected_c2.name()}")
+        c1, c2 = self.settings.colors
+        log.info("Применены цвета: C1=%s, C2=%s", c1.name(), c2.name())
         if self.overlay:
-            self.overlay.set_colors_instant(self.selected_c1, self.selected_c2)
-        
-        pair = (QColor(self.selected_c1), QColor(self.selected_c2))
-        if pair in self.custom_history:
-            self.custom_history.remove(pair)
-        self.custom_history.insert(0, pair)
-        if len(self.custom_history) > 5:
-            self.custom_history.pop()
+            self.overlay.set_colors(c1, c2)
 
-        self.update_history_ui()
-        self.save_config()
+        pair = (QColor(c1), QColor(c2))
+        if pair in self.settings.history:
+            self.settings.history.remove(pair)
+        self.settings.history.insert(0, pair)
+        del self.settings.history[HISTORY_SIZE:]
 
-    def quick_preset_apply(self, c1, c2):
-        self.selected_c1 = c1
-        self.selected_c2 = c2
-        if self.picker_dialog and self.picker_dialog.isVisible():
-            current = self.selected_c1 if self.active_slot == 1 else self.selected_c2
-            self.picker_dialog.wheel.set_color(current)
-            self.picker_dialog.val_slider.setValue(int(current.valueF() * 100))
-        self.update_buttons_ui()
+        self._refresh_history_ui()
+        self.schedule_save()
+
+    def apply_preset(self, c1, c2):
+        self.settings.colors = [QColor(c1), QColor(c2)]
+        self._sync_picker()
+        self._refresh_color_buttons()
         self.apply_colors()
 
-    def update_history_ui(self):
+    def apply_history(self, idx: int):
+        if idx < len(self.settings.history):
+            self.apply_preset(*self.settings.history[idx])
+
+    def _refresh_color_buttons(self):
+        for idx, btn in enumerate((self.btn_c1, self.btn_c2)):
+            color = self.settings.colors[idx]
+            border = f"2px solid {ACCENT}" if idx == self.active else "1px solid #333"
+            btn.setStyleSheet(f"background-color: {color.name()}; color: {readable_text_color(color)};"
+                              f" border-radius: 6px; font-weight: bold; border: {border};")
+
+    def _refresh_history_ui(self):
         for idx, btn in enumerate(self.history_buttons):
-            if idx < len(self.custom_history):
-                c1, c2 = self.custom_history[idx]
-                btn.setStyleSheet(f"""
-                    QPushButton {{
-                        background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {c1.name()}, stop:1 {c2.name()});
-                        border: 1px solid #555;
-                        border-radius: 6px;
-                    }}
-                    QPushButton:hover {{ border: 1px solid #fff; }}
-                """)
+            if idx < len(self.settings.history):
+                a, b = self.settings.history[idx]
+                btn.setStyleSheet(gradient_button_style(a.name(), b.name(), border="#555"))
                 btn.setEnabled(True)
+            else:
+                btn.setStyleSheet("background: rgba(24, 24, 34, 0.7); border: 1px dashed #333; border-radius: 6px;")
+                btn.setEnabled(False)
 
-    def apply_history_color(self, idx):
-        if idx < len(self.custom_history):
-            c1, c2 = self.custom_history[idx]
-            self.quick_preset_apply(c1, c2)
-
-    def change_width(self, val):
-        self.max_width = val
-        self.lbl_width.setText(f"ТОЛЩИНА: {val} px")
+    # ── эффект ──────────────────────────────────────────────────────────────
+    def change_width(self, value: int):
+        self.settings.max_width = value
+        self.lbl_width.setText(f"ТОЛЩИНА: {value} px")
         if self.overlay:
-            self.overlay.max_width = val
-            self.overlay.repaint()
-        self.save_config()
+            self.overlay.max_width = value
+            self.overlay.update()
+        self.schedule_save()
 
-    def change_fade(self, val):
-        self.fade_time = val / 1000.0
-        self.lbl_fade.setText(f"СКОРОСТЬ ИСЧЕЗНОВЕНИЯ: {val} мс")
+    def change_fade(self, value: int):
+        self.settings.fade_ms = value
+        self.lbl_fade.setText(f"СКОРОСТЬ ИСЧЕЗНОВЕНИЯ: {value} мс")
         if self.overlay:
-            self.overlay.fade_time = self.fade_time
-            self.overlay.repaint()
-        self.save_config()
+            self.overlay.fade_time = value / 1000.0
+            self.overlay.update()
+        self.schedule_save()
 
     def toggle_trail(self):
         if self.overlay is None:
-            logging.info("Эффект включен")
-            self.overlay = MouseTrailOverlay(
-                fade_time=self.fade_time,
-                max_width=self.max_width,
-                color1=self.selected_c1,
-                color2=self.selected_c2
-            )
+            log.info("Эффект включен")
+            s = self.settings
+            self.overlay = MouseTrailOverlay(s.fade_ms / 1000.0, s.max_width, *s.colors)
             self.overlay.show()
-            self.update_toggle_button_style(is_active=True)
         else:
-            logging.info("Эффект выключен")
-            self.overlay.close()
+            log.info("Эффект выключен")
+            self.overlay.shutdown()
             self.overlay = None
-            self.update_toggle_button_style(is_active=False)
+        self._refresh_toggle_ui()
 
-    def get_slider_style(self):
-        return """
-            QSlider::groove:horizontal { height: 4px; background: rgba(28, 28, 43, 0.8); border-radius: 2px; }
-            QSlider::sub-page:horizontal { background: #00ffc8; border-radius: 2px; }
-            QSlider::handle:horizontal { background: #ffffff; width: 14px; margin-top: -5px; margin-bottom: -5px; border-radius: 7px; }
-        """
+    def _refresh_toggle_ui(self):
+        active = self.overlay is not None
+        if active:
+            self.btn_toggle.setText("⏹ ВЫКЛЮЧИТЬ ЭФФЕКТ")
+            self.btn_toggle.setStyleSheet(outline_button_style(DANGER, hover_text="#ffffff"))
+        else:
+            self.btn_toggle.setText("▶ ВКЛЮЧИТЬ ЭФФЕКТ")
+            self.btn_toggle.setStyleSheet(outline_button_style(ACCENT))
+        if hasattr(self, "act_toggle"):
+            self.act_toggle.setText("Выключить эффект" if active else "Включить эффект")
 
-if __name__ == "__main__":
+
+# ──────────────────────────────────────────────────────────────────────────────
+def main() -> int:
+    setup_logging()
     app = QApplication(sys.argv)
     app.setQuitOnLastWindowClosed(False)
-    
-    panel = ModernControlPanel()
+
+    # Защита от второго экземпляра (например, автозапуск + ручной запуск)
+    guard = QSharedMemory(f"{APP_NAME}_single_instance")
+    if guard.attach():
+        guard.detach()  # на Unix чистит «осиротевший» сегмент после падения
+    if not guard.create(1):
+        log.warning("Приложение уже запущено — выход")
+        return 0
+
+    panel = ControlPanel()
     panel.show()
-    sys.exit(app.exec_())
+    return app.exec_()
+
+
+if __name__ == "__main__":
+    sys.exit(main())
