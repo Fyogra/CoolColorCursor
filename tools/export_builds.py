@@ -19,6 +19,8 @@ MAX_FAILED = 0.2      # доля героев без данных, после к
 
 
 def main() -> int:
+    for stream in (sys.stdout, sys.stderr):
+        stream.reconfigure(encoding="utf-8", errors="replace")  # консоль CI может быть не UTF-8
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="", help="id героев через запятую (для проверки)")
     ap.add_argument("--out", default="data")

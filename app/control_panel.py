@@ -611,9 +611,9 @@ class ControlPanel(QWidget):
             # Клик по золоту — моментально открываем сборки, не дожидаясь детектора
             if self.gold_watcher.check(self.settings.builds_gold_zone):
                 self._auto_show_builds("right")
-            # Полная проба каждые ~450 мс (3 тика) — чаще нет смысла
+            # Полная проба каждые ~400 мс (2 тика)
             self._shop_poll += 1
-            if self._shop_poll >= 3:
+            if self._shop_poll >= 2:
                 self._shop_poll = 0
                 side = self.shop_detector.probe()
                 if side != getattr(self, "_last_shop_side", None):

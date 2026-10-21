@@ -21,6 +21,7 @@ jobs:
       - run: python tools/export_builds.py
         env:
           STRATZ_TOKEN: ${{ secrets.STRATZ_TOKEN }}
+          PYTHONUTF8: "1"
       - name: Commit data
         shell: bash
         run: |

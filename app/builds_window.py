@@ -116,8 +116,10 @@ class ShopDetector:
         self.last_metrics = {"right": right, "left": left, "w": w, "h": h}
         side = "right" if right_ok else ("left" if left_ok else None)
         self._history.append(side)
-        # Нужно, чтобы последние кадры стабильно показывали одно и то же
-        if len(self._history) == SHOP_STABLE_FRAMES and len(set(self._history)) == 1:
+        # Открытие подтверждаем несколькими кадрами подряд, а закрытие — сразу по первому кадру без магазина
+        if side is None:
+            self._side = None
+        elif len(self._history) == SHOP_STABLE_FRAMES and len(set(self._history)) == 1:
             self._side = side
         return self._side
 
@@ -254,6 +256,8 @@ class ImageCache(QObject):
 #  Окно сборок
 # ──────────────────────────────────────────────────────────────────────────────
 TALENT_COLOR = "#e0b95b"
+# Палитра под магазин Dota 2: почти чёрный фон, тонкие тёмные рамки, золото для акцентов
+SHOP_GOLD, SHOP_GOLD_DIM, SHOP_EDGE, SHOP_PANEL, SHOP_SLOT = "#e3c06f", "#8a7440", "#2b3138", "#14181c", "#0b0d10"
 
 
 def _clear_layout(layout):
@@ -281,8 +285,8 @@ class IconTile(ClickLabel):
         self.setFixedSize(w, h)
         self.setAlignment(Qt.AlignCenter)
         self.setText(placeholder)
-        self.setStyleSheet(f"background: #1c1c28; color: {color}; border: 1px solid #2a2a3a;"
-                           " border-radius: 4px; font-size: 9px; font-weight: bold;")
+        self.setStyleSheet(f"background: {SHOP_SLOT}; color: {color}; border: 1px solid #3a3f46;"
+                           " border-radius: 2px; font-size: 9px; font-weight: bold;")
 
     def set_pixmap(self, pixmap: QPixmap):
         self.setText("")
@@ -442,8 +446,8 @@ class BuildsWindow(QWidget):
         outer.setContentsMargins(0, 0, 0, 0)
         card = QFrame(self)
         card.setObjectName("builds")
-        card.setStyleSheet(f"#builds {{ background-color: rgba(17, 17, 24, 245); border: 1px solid {ACCENT};"
-                           " border-radius: 14px; }")
+        card.setStyleSheet(f"#builds {{ background-color: rgba(11, 13, 16, 248); border: 1px solid {SHOP_GOLD_DIM};"
+                           " border-radius: 6px; }")
         outer.addWidget(card)
         body = QVBoxLayout(card)
         body.setContentsMargins(12, 10, 12, 10)
@@ -481,9 +485,9 @@ class BuildsWindow(QWidget):
         self.combo.setMaxVisibleItems(15)
         self.combo.lineEdit().setPlaceholderText("Поиск героя…")
         self.combo.setStyleSheet(
-            f"QComboBox {{ background: #1a1a24; color: {TEXT}; border: 1px solid #2a2a3a; border-radius: 6px;"
+            f"QComboBox {{ background: {SHOP_SLOT}; color: {TEXT}; border: 1px solid {SHOP_EDGE}; border-radius: 2px;"
             " padding: 3px 8px; }"
-            f" QComboBox:focus {{ border: 1px solid {ACCENT}; }}"
+            f" QComboBox:focus {{ border: 1px solid {SHOP_GOLD_DIM}; }}"
             f" QComboBox QAbstractItemView {{ {view_style} }}")
         completer = self.combo.completer()
         completer.setCompletionMode(QCompleter.PopupCompletion)
@@ -501,9 +505,9 @@ class BuildsWindow(QWidget):
         self.role_buttons = []
         for i, name in enumerate(POSITIONS):
             btn = make_button(name, height=26, font=QFont(FONT, 9, QFont.Bold), style=(
-                f"QPushButton {{ background: #1a1a24; color: {MUTED}; border: 1px solid #2a2a3a; border-radius: 6px; }}"
-                f" QPushButton:hover {{ border: 1px solid {ACCENT}; }}"
-                " QPushButton:checked { background: #f2f2f2; color: #000; border: 1px solid #f2f2f2; }"))
+                f"QPushButton {{ background: {SHOP_PANEL}; color: {MUTED}; border: 1px solid {SHOP_EDGE}; border-radius: 2px; }}"
+                f" QPushButton:hover {{ border: 1px solid {SHOP_GOLD_DIM}; color: {TEXT}; }}"
+                f" QPushButton:checked {{ background: #2a2316; color: {SHOP_GOLD}; border: 1px solid {SHOP_GOLD_DIM}; }}"))
             btn.setCheckable(True)
             btn.setChecked(i == self.role)
             btn.setToolTip(f"Позиция {i + 1}: {POSITION_NAMES[i]}")
@@ -522,7 +526,7 @@ class BuildsWindow(QWidget):
         scroll.setStyleSheet(
             "QScrollArea, QWidget#qt_scrollarea_viewport, QWidget#buildsContent { background: transparent; }"
             " QScrollBar:vertical { width: 6px; background: transparent; }"
-            " QScrollBar::handle:vertical { background: #333344; border-radius: 3px; min-height: 30px; }"
+            " QScrollBar::handle:vertical { background: #3a3f46; border-radius: 2px; min-height: 30px; }"
             " QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }")
         content = QWidget()
         content.setObjectName("buildsContent")
@@ -533,7 +537,7 @@ class BuildsWindow(QWidget):
 
         self.phase_grids = {}
         for phase, title in PHASES:
-            cl.addWidget(caption(title.upper(), size=10, color=TEXT))
+            cl.addWidget(caption(title.upper(), size=10, color=SHOP_GOLD))
             grid = QGridLayout()
             grid.setHorizontalSpacing(6)
             grid.setVerticalSpacing(2)
@@ -542,7 +546,7 @@ class BuildsWindow(QWidget):
             cl.addWidget(holder)
             self.phase_grids[phase] = grid
 
-        cl.addWidget(caption("ПРОКАЧКА СПОСОБНОСТЕЙ", size=10, color=TEXT))
+        cl.addWidget(caption("ПРОКАЧКА СПОСОБНОСТЕЙ", size=10, color=SHOP_GOLD))
         self.skill_grid = QGridLayout()
         self.skill_grid.setHorizontalSpacing(3)
         self.skill_grid.setVerticalSpacing(2)
@@ -553,7 +557,7 @@ class BuildsWindow(QWidget):
         self.lbl_skills.setWordWrap(True)
         cl.addWidget(self.lbl_skills)
 
-        cl.addWidget(caption("ТАЛАНТЫ", size=10, color=TEXT))
+        cl.addWidget(caption("ТАЛАНТЫ", size=10, color=SHOP_GOLD))
         self.talents_grid = QGridLayout()
         self.talents_grid.setHorizontalSpacing(6)
         self.talents_grid.setVerticalSpacing(3)
@@ -574,8 +578,8 @@ class BuildsWindow(QWidget):
         self.lbl_status = caption("", size=9, color=DIM)
         self.lbl_status.setWordWrap(True)
         btn_refresh = make_button("⟳", size=(26, 26), font=QFont(FONT_SYMBOL, 11, QFont.Bold), style=(
-            f"QPushButton {{ background: transparent; color: {ACCENT}; border: 1px solid #2a2a3a; border-radius: 6px; }}"
-            f" QPushButton:hover {{ border: 1px solid {ACCENT}; }}"))
+            f"QPushButton {{ background: transparent; color: {SHOP_GOLD}; border: 1px solid {SHOP_EDGE}; border-radius: 2px; }}"
+            f" QPushButton:hover {{ border: 1px solid {SHOP_GOLD_DIM}; }}"))
         btn_refresh.setToolTip("Скачать свежую сборку, не дожидаясь суточного обновления")
         btn_refresh.clicked.connect(lambda: self.refresh(force=True))
         footer.addWidget(self.lbl_status, 1)
