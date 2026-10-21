@@ -1,0 +1,244 @@
+"""Константы, пути, логирование, настройки, автозапуск."""
+from __future__ import annotations
+
+import json
+import logging
+import os
+import sys
+import tempfile
+from PyQt5.QtGui import QColor
+from logging.handlers import RotatingFileHandler
+from typing import Optional, Tuple
+
+
+IS_WINDOWS = sys.platform == "win32"
+
+if IS_WINDOWS:
+    import winreg  # нужен только для автозапуска
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Константы, пути, логирование
+# ──────────────────────────────────────────────────────────────────────────────
+APP_NAME = "CCC"
+APP_TITLE = "CCC|CoolColorCursor"
+REG_AUTOSTART_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+
+# Тема
+BG = "#111118"
+BORDER = "#222233"
+ACCENT = "#00ffc8"
+DANGER = "#ff0055"
+TEXT = "#dddddd"
+MUTED = "#aaaaaa"
+DIM = "#666666"
+FONT = "Segoe UI"
+FONT_SYMBOL = "Segoe UI Symbol"
+
+DEFAULT_C1 = "#00ccff"
+DEFAULT_C2 = "#ff0080"
+HISTORY_SIZE = 5
+
+log = logging.getLogger("ccc")
+
+
+def _app_dir() -> str:
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(sys.executable)
+    return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # папка с main.py
+
+
+def _data_dir() -> str:
+    """Папка для конфига и лога: рядом с программой, а если туда нельзя писать — в %APPDATA%."""
+    base = _app_dir()
+    if os.access(base, os.W_OK):
+        return base
+    fallback = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
+    try:
+        os.makedirs(fallback, exist_ok=True)
+        return fallback
+    except OSError:
+        return tempfile.gettempdir()
+
+
+DATA_DIR = _data_dir()
+CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+LOG_FILE = os.path.join(DATA_DIR, "mouse_trail.log")
+ICON_FILE = os.path.join(DATA_DIR, "app_icon.ico")
+
+
+def setup_logging() -> None:
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=512 * 1024, backupCount=1, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(message)s"))
+    log.setLevel(logging.INFO)
+    log.addHandler(handler)
+
+    def log_uncaught(exc_type, exc, tb):
+        # Без своего excepthook PyQt5 роняет процесс на любом исключении внутри слота
+        log.critical("Необработанное исключение", exc_info=(exc_type, exc, tb))
+
+    sys.excepthook = log_uncaught
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Автозапуск
+# ──────────────────────────────────────────────────────────────────────────────
+def autostart_command() -> str:
+    if getattr(sys, "frozen", False):
+        return f'"{sys.executable}"'
+    # Запуск .py напрямую открыл бы его в ассоциированной программе, поэтому — pythonw
+    pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
+    interpreter = pythonw if os.path.exists(pythonw) else sys.executable
+    return f'"{interpreter}" "{os.path.abspath(sys.argv[0])}"'
+
+
+def set_autostart(enable: bool) -> bool:
+    """Добавляет/убирает программу из автозапуска. Возвращает True при успехе."""
+    if not IS_WINDOWS:
+        return False
+    try:
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, REG_AUTOSTART_KEY, 0,
+                            winreg.KEY_SET_VALUE) as key:
+            if enable:
+                winreg.SetValueEx(key, APP_NAME, 0, winreg.REG_SZ, autostart_command())
+                log.info("Добавлено в автозагрузку")
+            else:
+                try:
+                    winreg.DeleteValue(key, APP_NAME)
+                    log.info("Удалено из автозагрузки")
+                except FileNotFoundError:
+                    pass
+        return True
+    except OSError as e:
+        log.error("Ошибка настройки автозагрузки: %s", e)
+        return False
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  Настройки
+# ──────────────────────────────────────────────────────────────────────────────
+def _clamp(value, lo, hi, default, scale=1.0):
+    try:
+        return max(lo, min(hi, int(round(float(value) * scale))))
+    except (TypeError, ValueError):
+        return default
+
+
+def _point(value) -> Optional[Tuple[int, int]]:
+    if isinstance(value, (list, tuple)) and len(value) == 2:
+        try:
+            return int(value[0]), int(value[1])
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def _color(value, default) -> QColor:
+    color = QColor(str(value))
+    return color if color.isValid() else QColor(default)
+
+
+class Settings:
+    """Настройки приложения. Формат config.json совместим со старой версией."""
+
+    def __init__(self):
+        self.colors = [QColor(DEFAULT_C1), QColor(DEFAULT_C2)]
+        self.max_width = 12
+        self.fade_ms = 400
+        self.autostart_asked = False
+        self.autostart_enabled = False
+        self.timers_enabled = True   # показывать таймеры Dota 2
+        self.hud_pos = None          # (x, y), если таймеры перетащили; None — под часами игры
+        self.sound_enabled = True    # колокольчик перед лотусом
+        self.sound_file = ""         # свой WAV; пустая строка — встроенный звон
+        self.sound_volume = 70       # громкость звонка, 0..100
+        self.hud_hold_alt = True     # True — HUD виден только пока зажат Alt (поведение по умолчанию)
+        self.builds_auto = True      # True — сборки автоматически появляются при открытом магазине
+        self.builds_gold_zone = None # (x, y, w, h) зоны кнопки золота; None — автозона 20% справа снизу
+        self.launcher_enabled = True # иконка-кнопка в углу экрана
+        self.launcher_pos = None
+        self.builds_pos = None
+        self.builds_role = 0         # вкладка позиции в окне сборок: 0..4
+        self.builds_hero = 0         # последний герой в окне сборок
+        self.history = []  # [(QColor, QColor), ...], свежие — в начале
+
+    @classmethod
+    def load(cls, path: str) -> "Settings":
+        s = cls()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+            if not isinstance(raw, dict):
+                raise ValueError("корень конфигурации — не объект")
+        except FileNotFoundError:
+            return s
+        except (OSError, ValueError) as e:
+            log.error("Ошибка загрузки конфигурации: %s", e)
+            return s
+
+        s.colors = [_color(raw.get("color1"), DEFAULT_C1), _color(raw.get("color2"), DEFAULT_C2)]
+        s.max_width = _clamp(raw.get("max_width", 12), 2, 50, 12)
+        s.fade_ms = _clamp(raw.get("fade_time", 0.4), 100, 1500, 400, scale=1000)
+        s.autostart_asked = bool(raw.get("autostart_asked", False))
+        s.autostart_enabled = bool(raw.get("autostart_enabled", False))
+        s.timers_enabled = bool(raw.get("timers_enabled", True))
+        # Ключ новый: старая позиция («правый верхний угол») не должна мешать встать под часы игры
+        s.hud_pos = _point(raw.get("hud_custom_pos"))
+        s.sound_enabled = bool(raw.get("sound_enabled", True))
+        s.sound_file = str(raw.get("sound_file") or "")
+        s.sound_volume = _clamp(raw.get("sound_volume", 70), 0, 100, 70)
+        s.hud_hold_alt = bool(raw.get("hud_hold_alt", True))
+        s.builds_auto = bool(raw.get("builds_auto", True))
+        gold = raw.get("builds_gold_zone")
+        if isinstance(gold, (list, tuple)) and len(gold) == 4:
+            try:
+                s.builds_gold_zone = tuple(int(v) for v in gold)
+            except (TypeError, ValueError):
+                pass
+        s.launcher_enabled = bool(raw.get("launcher_enabled", True))
+        s.launcher_pos = _point(raw.get("launcher_pos"))
+        s.builds_pos = _point(raw.get("builds_pos"))
+        s.builds_role = _clamp(raw.get("builds_role", 0), 0, 4, 0)
+        s.builds_hero = _clamp(raw.get("builds_hero", 0), 0, 10000, 0)
+
+        history = raw.get("history")
+        if isinstance(history, list):
+            for item in history[:HISTORY_SIZE]:
+                if isinstance(item, (list, tuple)) and len(item) == 2:
+                    a, b = QColor(str(item[0])), QColor(str(item[1]))
+                    if a.isValid() and b.isValid():
+                        s.history.append((a, b))
+        log.info("Конфигурация загружена")
+        return s
+
+    def save(self, path: str) -> None:
+        data = {
+            "color1": self.colors[0].name(),
+            "color2": self.colors[1].name(),
+            "max_width": self.max_width,
+            "fade_time": self.fade_ms / 1000.0,
+            "autostart_asked": self.autostart_asked,
+            "autostart_enabled": self.autostart_enabled,
+            "timers_enabled": self.timers_enabled,
+            "hud_custom_pos": list(self.hud_pos) if self.hud_pos else None,
+            "sound_enabled": self.sound_enabled,
+            "sound_file": self.sound_file,
+            "sound_volume": self.sound_volume,
+            "hud_hold_alt": self.hud_hold_alt,
+            "builds_auto": self.builds_auto,
+            "builds_gold_zone": list(self.builds_gold_zone) if self.builds_gold_zone else None,
+            "launcher_enabled": self.launcher_enabled,
+            "launcher_pos": list(self.launcher_pos) if self.launcher_pos else None,
+            "builds_pos": list(self.builds_pos) if self.builds_pos else None,
+            "builds_role": self.builds_role,
+            "builds_hero": self.builds_hero,
+            "history": [[a.name(), b.name()] for a, b in self.history],
+        }
+        tmp = path + ".tmp"
+        try:
+            # Пишем во временный файл и подменяем — конфиг не побьётся при сбое посреди записи
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4)
+            os.replace(tmp, path)
+            log.info("Конфигурация сохранена")
+        except OSError as e:
+            log.error("Ошибка сохранения конфигурации: %s", e)

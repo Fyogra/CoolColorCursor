@@ -1,0 +1,1 @@
+"""CCC | CoolColorCursor: модули приложения."""

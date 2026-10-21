@@ -1,0 +1,12 @@
+api.txt
+config.json
+cache/
+build/
+dist/
+*.log
+*.txt
+*.bak
+*.exe
+*.msix
+__pycache__/
+иконки/
