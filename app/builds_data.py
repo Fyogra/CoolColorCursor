@@ -33,7 +33,7 @@ STRATZ_BRACKET = "DIVINE_IMMORTAL"                      # хай-рейтинг�
 STRATZ_BRACKETS_WIDER = ("LEGEND_ANCIENT, DIVINE_IMMORTAL", "CRUSADER_ARCHON, LEGEND_ANCIENT, DIVINE_IMMORTAL")
 STRATZ_MIN_GAMES = 200
 # Готовые сборки: GitHub Actions выгружает их из Stratz раз в сутки (tools/export_builds.py)
-PUBLISHED_URL = "https://raw.githubusercontent.com/Fyogra/ccc-overlay/main/data/builds/{}.json"
+PUBLISHED_URL = "https://raw.githubusercontent.com/Fyogra/CoolColorCursor/main/data/builds/{}.json"
 
 POSITIONS = ("Carry", "Mid", "Offlane", "4", "5")  # вкладки 0..4 ↔ позиции 1..5
 POSITION_NAMES = ("Керри", "Мидер", "Хардлейнер", "Четвёрка", "Пятёрка")
