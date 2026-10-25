@@ -1,21 +1,20 @@
 """Свой маркер движения внутри Dota 2: шесть частиц clicked_occlusion_* с нужными цветами и шевроны вместо стрелок.
 
 Пак (обычно pak67_dir.vpk, если номер свободен) кладётся в game/dota_russian (работает при параметре запуска -language russian). Цвета лежат в
-самих частицах как целые числа (r, g, b). Своих частиц мы не распространяем: пользователь один раз выбирает
-пак-образец (любой пак маркера с перекрашенными clicked_occlusion_*), мы сохраняем из него эти шесть частиц,
-сами находим их цвет и дальше подставляем свои. Файлы самой игры не меняются, выключение удаляет наш пак.
+самих частицах как целые числа (r, g, b): заготовки в app/assets/marker — родные частицы Valve, пересобранные
+общим сборщиком модов (d2pfx_compiler) с полями цвета, как в любом паке маркера; мы подставляем в них свои цвета.
+Файлы самой игры не меняются, выключение удаляет наш пак.
 """
 from __future__ import annotations
 
-import collections
-import json
 import os
 import struct
 from typing import Dict, Optional, Tuple
 from app import dota_mod as dm
-from app.config import DATA_DIR, log
+from app.config import log
 
-TEMPLATE_DIR = os.path.join(DATA_DIR, "marker_templates")   # частицы из пака-образца и их цвет (color.json)
+TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "marker")
+TEMPLATE_RGB = (99, 60, 175)           # цвет, которым покрашены заготовки
 PARTICLE_DIR = "particles/ui_mouseactions/"
 ARROW_TEXTURE = "materials/particle/arrow_down.vtex_c"
 
@@ -27,82 +26,8 @@ REST_PARTICLES = ("clicked_occlusion_basemove", "clicked_occlusion_basemove_shad
 RGB = Tuple[int, int, int]
 
 
-def _first_block(data: bytes):
-    """Разбор заготовки: (распакованный первый LZ4-блок, всё нужное для обратной сборки); ValueError — формат не тот."""
-    _fs, _hv, _ver, block_off, count = struct.unpack_from("<IHHII", data, 0)
-    pos, last = 8 + block_off, None
-    for _ in range(count):
-        rel, size = struct.unpack_from("<II", data, pos + 4)
-        last = (data[pos:pos + 4], pos + 4 + rel, size, pos)
-        pos += 12
-    name, start, size, head_pos = last
-    blk = data[start:start + size]
-    if name != b"DATA" or start + size != len(data) or blk[:4] != bytes.fromhex("0533564b"):
-        raise ValueError("не KV3 v5")
-    if struct.unpack_from("<I", blk, 20)[0] != 1:
-        raise ValueError("не LZ4")
-    u1, c1, _u2, c2 = struct.unpack_from("<IIII", blk, 72)
-    if 120 + c1 + c2 != len(blk):
-        raise ValueError("неожиданные размеры блоков")
-    return dm._lz4_decompress(blk[120:120 + c1], u1)
-
-
-def detect_color(files) -> Optional[RGB]:
-    """Цвет пака-образца: тройка (r, g, b), которая есть во всех его частицах (и встречается чаще прочих)."""
-    common, total = None, collections.Counter()
-    for data in files:
-        try:
-            raw = _first_block(data)
-        except (struct.error, ValueError, IndexError):
-            return None
-        seen = collections.Counter()
-        for i in range(0, len(raw) - 11, 4):
-            t = struct.unpack_from("<iii", raw, i)
-            if all(0 <= v <= 255 for v in t) and len(set(t)) > 1 and max(t) > 20:
-                seen[t] += 1
-        common = set(seen) if common is None else common & set(seen)
-        total.update(seen)
-    if not common:
-        return None
-    return max(common, key=lambda t: total[t])
-
-
-def has_templates() -> bool:
-    return os.path.exists(os.path.join(TEMPLATE_DIR, "color.json"))
-
-
-def _template_rgb() -> RGB:
-    with open(os.path.join(TEMPLATE_DIR, "color.json"), encoding="utf-8") as f:
-        return tuple(json.load(f)["rgb"])
-
-
-def import_templates(path: str) -> Tuple[bool, str]:
-    """Сохраняет шесть частиц маркера из пака-образца (.vpk) и находит их цвет."""
-    names = PETAL_PARTICLES + REST_PARTICLES
-    try:
-        tree = dm._read_tree(path)
-        inner = [PARTICLE_DIR + n + ".vpcf_c" for n in names]
-        missing = [n for n, i in zip(names, inner) if i not in tree[0]]
-        if missing:
-            return False, "В этом паке нет нужных частиц маркера: " + ", ".join(missing)
-        files = [dm._read_from(path, tree, i) for i in inner]
-    except (OSError, ValueError, KeyError, struct.error) as e:
-        return False, f"Не получилось прочитать пак: {e}"
-    rgb = detect_color(files)
-    if rgb is None or any(recolor_template(f, (1, 2, 3), rgb) is None for f in files):
-        return False, "Частицы в этом паке другого формата — такой пак не подходит."
-    os.makedirs(TEMPLATE_DIR, exist_ok=True)
-    for n, data in zip(names, files):
-        with open(os.path.join(TEMPLATE_DIR, n + ".vpcf_c"), "wb") as f:
-            f.write(data)
-    with open(os.path.join(TEMPLATE_DIR, "color.json"), "w", encoding="utf-8") as f:
-        json.dump({"rgb": list(rgb), "source": os.path.basename(path)}, f)
-    log.info("Пак-образец маркера: %s, цвет %s", path, rgb)
-    return True, ""
-
-
-def recolor_template(data: bytes, rgb: RGB, template_rgb: RGB) -> Optional[bytes]:
-    """Заготовка .vpcf_c (KV3 v5, два LZ4-блока) с цветом rgb вместо template_rgb; None — формат не тот."""
+def recolor_template(data: bytes, rgb: RGB) -> Optional[bytes]:
+    """Заготовка .vpcf_c (KV3 v5, два LZ4-блока) с цветом rgb вместо TEMPLATE_RGB; None — формат не тот."""
     try:
         _fs, _hv, _ver, block_off, count = struct.unpack_from("<IHHII", data, 0)
         pos, last = 8 + block_off, None
@@ -121,7 +46,7 @@ def recolor_template(data: bytes, rgb: RGB, template_rgb: RGB) -> Optional[bytes
         if body + c1 + c2 != len(blk):
             return None
         raw1 = bytearray(dm._lz4_decompress(blk[body:body + c1], u1))
-        old, new = struct.pack("<iii", *template_rgb), struct.pack("<iii", *rgb)
+        old, new = struct.pack("<iii", *TEMPLATE_RGB), struct.pack("<iii", *rgb)
         hits, i = 0, raw1.find(old)
         while i >= 0:
             raw1[i:i + 12] = new
@@ -203,11 +128,10 @@ def chevron_texture(original: bytes) -> Optional[bytes]:
 def build_files(petals: RGB, rest: RGB, chevron: bool = True) -> Tuple[Dict[str, bytes], int]:
     """Файлы пака: частицы с цветами и (по желанию) шеврон. Возвращает (файлы, сколько частиц получилось)."""
     files: Dict[str, bytes] = {}
-    template_rgb = _template_rgb()
     for names, rgb in ((PETAL_PARTICLES, petals), (REST_PARTICLES, rest)):
         for name in names:
             with open(os.path.join(TEMPLATE_DIR, name + ".vpcf_c"), "rb") as f:
-                new = recolor_template(f.read(), rgb, template_rgb)
+                new = recolor_template(f.read(), rgb)
             if new is not None:
                 files[PARTICLE_DIR + name + ".vpcf_c"] = new
     count = len(files)
@@ -223,8 +147,6 @@ def install(petals: RGB, rest: RGB, chevron: bool = True) -> Tuple[bool, str]:
     game = dm.game_dir()
     if not game:
         return False, "Не нашёл папку Dota 2."
-    if not has_templates():
-        return False, "Сначала выбери пак-образец маркера (кнопка «+ пак-образец»)."
     try:
         files, count = build_files(petals, rest, chevron)
         if count < len(PETAL_PARTICLES) + len(REST_PARTICLES):

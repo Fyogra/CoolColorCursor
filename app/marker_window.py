@@ -2,13 +2,11 @@
 from __future__ import annotations
 
 import math
-import os
 import time
 from typing import Callable, Optional, Tuple
 from PyQt5.QtCore import QPointF, QTimer, Qt
 from PyQt5.QtGui import QColor, QFont, QPainter, QPainterPath, QPen, QPolygonF
-from PyQt5.QtWidgets import QApplication, QCheckBox, QFileDialog, QHBoxLayout, QLabel, QWidget
-from app import dota_mod, ingame_marker
+from PyQt5.QtWidgets import QApplication, QCheckBox, QHBoxLayout, QLabel, QWidget
 from app.config import ACCENT, DIM, FONT, FONT_SYMBOL
 from app.ui_common import ColorPickerWindow, FramelessCard, caption, make_button, outline_button_style
 
@@ -144,7 +142,7 @@ class ColorRow(QWidget):
 class MarkerDialog(FramelessCard):
     def __init__(self, petals: str, rest: str, chevron: bool, installed: bool,
                  on_apply: Callable[[str, str, bool], Result], on_revert: Callable[[], Result], parent=None):
-        super().__init__((470, 510), radius=16, border_width=2, parent=parent, starry=True)
+        super().__init__((470, 475), radius=16, border_width=2, parent=parent, starry=True)
         self._on_apply, self._on_revert = on_apply, on_revert
         self.body.setContentsMargins(20, 18, 20, 18)
         self.body.setSpacing(10)
@@ -176,18 +174,6 @@ class MarkerDialog(FramelessCard):
         self.chk_shape.setStyleSheet("color: #ddd;")
         self.body.addWidget(self.chk_shape)
 
-        sample = QHBoxLayout()
-        self.lbl_sample = caption("", size=8, color=DIM)
-        self.lbl_sample.setWordWrap(True)
-        btn_sample = make_button("+ пак-образец", size=(110, 26), font=QFont(FONT, 8, QFont.Bold),
-                                 style=outline_button_style(ACCENT, radius=8))
-        btn_sample.setToolTip("Любой пак маркера с частицами clicked_occlusion_*: берём из него только форму, цвета ставим свои")
-        btn_sample.clicked.connect(self._pick_sample)
-        sample.addWidget(self.lbl_sample, 1)
-        sample.addWidget(btn_sample)
-        self.body.addLayout(sample)
-        self._show_sample()
-
         self.lbl_status = caption("", size=9, color=DIM)
         self.lbl_status.setWordWrap(True)
         self.body.addWidget(self.lbl_status)
@@ -213,22 +199,6 @@ class MarkerDialog(FramelessCard):
 
     def _set_rest(self, color: QColor):
         self.preview.rest = QColor(color)
-
-    def _show_sample(self):
-        if ingame_marker.has_templates():
-            self.lbl_sample.setText("Пак-образец выбран — можно применять.")
-        else:
-            self.lbl_sample.setText("Нужен пак-образец: любой пак маркера Dota с частицами clicked_occlusion_*. "
-                                    "Из него берётся только форма, цвета — твои.")
-
-    def _pick_sample(self):
-        game = dota_mod.game_dir()
-        start = os.path.join(game, dota_mod.LANG_DIR) if game else ""
-        path, _ = QFileDialog.getOpenFileName(self, "Пак-образец маркера", start, "Пак Dota (*.vpk)")
-        if path:
-            ok, err = ingame_marker.import_templates(path)
-            self._show_sample()
-            self.lbl_status.setText("Пак-образец сохранён." if ok else err)
 
     def _set_status(self, installed: bool, note: str = ""):
         text = "Сейчас в игре: свой маркер установлен" if installed else "Сейчас в игре: стандартный маркер"
