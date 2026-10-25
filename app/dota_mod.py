@@ -180,8 +180,11 @@ def relocate() -> None:
     for kind, path in _scan().items():
         if _num(path) in RESERVED:
             new = _free_slot(kind)
-            if new:
-                os.replace(path, new)
+            if new:                                  # пересобираем с меткой: без неё на новом номере пак не узнать
+                tree = _read_tree(path)
+                files = {inner: _read_from(path, tree, inner) for inner in tree[0]}
+                _write_vpk(new, {**files, _tag(kind): b"CoolColorCursor\n"})
+                os.remove(path)
 
 
 def write_pak(kind: str, files: Dict[str, bytes]) -> str:
