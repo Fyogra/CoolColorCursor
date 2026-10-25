@@ -1,4 +1,4 @@
-"""Сборки внутри магазина Dota 2: JS с данными дописывается в dota_hud_shop.vjs_c, пак pak68_dir.vpk в game/dota_russian.
+"""Сборки внутри магазина Dota 2: JS с данными дописывается в dota_hud_shop.vjs_c, пак (обычно pak68_dir.vpk) в game/dota_russian.
 Данные берутся из опубликованных сборок (PUBLISHED_URL); пак обновляется раз в сутки и после обновления игры,
 если он уже установлен. Файлы самой игры не меняются."""
 from __future__ import annotations
@@ -9,7 +9,7 @@ import struct
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
-from typing import Optional, Tuple
+from typing import Tuple
 from app import dota_mod as d
 from app.builds_data import CACHE_DIR, PUBLISHED_URL
 from app.config import DATA_DIR, log
@@ -17,7 +17,6 @@ from app import ability_info, skill_order
 from app.skill_order import normalize, _info as so_info
 
 JS = "panorama/scripts/hud/dota_hud_shop.vjs_c"
-PAK_NAME = "pak68_dir.vpk"
 STATE_FILE = os.path.join(DATA_DIR, "shop_state.json")
 REFRESH_SECONDS = 20 * 3600
 PHASES = ("start", "early", "mid", "late")
@@ -369,14 +368,8 @@ JS_TEMPLATE = r'''
 '''.replace("\n", "\r\n")
 
 
-def pak_path() -> Optional[str]:
-    game = d.game_dir()
-    return os.path.join(game, d.LANG_DIR, PAK_NAME) if game else None
-
-
 def is_installed() -> bool:
-    path = pak_path()
-    return bool(path and os.path.exists(path))
+    return bool(d.our_pak("shop"))
 
 
 def _game_signature() -> str:
@@ -406,21 +399,18 @@ def needs_refresh() -> bool:
 
 
 def uninstall() -> Tuple[bool, str]:
-    path = pak_path()
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-        except PermissionError:
-            return False, "Файл занят: закрой Dota 2 и попробуй снова."
-        except OSError as e:
-            return False, f"Не получилось удалить пак: {e}"
+    try:
+        d.remove_pak("shop")
+    except PermissionError:
+        return False, "Файл занят: закрой Dota 2 и попробуй снова."
+    except OSError as e:
+        return False, f"Не получилось удалить пак: {e}"
     return True, ""
 
 
 def build() -> Tuple[bool, str]:
     """Собирает данные и записывает пак. При открытой Dota файл занят — вернёт (False, причина)."""
-    path = pak_path()
-    if not path:
+    if not d.game_dir():
         return False, "Не нашёл папку Dota 2."
     if _read_state().get("game") != _game_signature():   # игра обновилась: новые герои и скиллы
         try:
@@ -451,8 +441,7 @@ def build() -> Tuple[bool, str]:
         out = bytearray(blob[:start]) + new_blk
         struct.pack_into("<I", out, 0, len(out))
         struct.pack_into("<I", out, head_pos + 8, len(new_blk))
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        d._write_vpk(path, {JS: bytes(out)})
+        path = d.write_pak("shop", {JS: bytes(out)})
     except PermissionError:
         return False, "Файл занят: закрой Dota 2 и попробуй снова."
     except (OSError, KeyError, ValueError, struct.error) as e:

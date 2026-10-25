@@ -1,7 +1,6 @@
 """Окно «Ранг в Dota 2»: настоящий ранг, каким его показывать, превью и установка в игру."""
 from __future__ import annotations
 
-import os
 from typing import Callable, Dict, Tuple
 from PyQt5.QtCore import Qt
 from PyQt5.QtGui import QFont, QImage, QPainter, QPixmap
@@ -185,8 +184,8 @@ class RankDialog(FramelessCard):
         self.show_as.set_icons(self.sets.currentData() or "")
 
     def _add_pak(self):
-        start = rank_mod.pak_path()
-        path, _ = QFileDialog.getOpenFileName(self, "Пак с рангами", os.path.dirname(start) if start else "", "Пак Dota (*.vpk)")
+        start = rank_mod.lang_dir()
+        path, _ = QFileDialog.getOpenFileName(self, "Пак с рангами", start or "", "Пак Dota (*.vpk)")
         if path:
             ok, res = rank_mod.import_vpk(path)
             self._set_status(rank_mod.is_installed(), f"Добавлен набор «{res}»." if ok else res)

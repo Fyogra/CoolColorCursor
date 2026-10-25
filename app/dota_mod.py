@@ -6,13 +6,14 @@
 from __future__ import annotations
 
 import binascii
+import json
 import os
 import re
 import struct
 from typing import Dict, Optional, Tuple
+from app.config import DATA_DIR
 from app.gsi import _steam_roots, find_dota_cfg_dir
 
-PAK_NAME = "pak67_dir.vpk"          # пак маркера клика (app/ingame_marker.py)
 LANG_DIR = "dota_russian"
 LAUNCH_OPTION = "-language russian"
 VPK_SIGNATURE = 0x55AA1234
@@ -72,14 +73,98 @@ def game_dir() -> Optional[str]:
     return os.path.dirname(os.path.dirname(cfg)) if cfg else None
 
 
-def pak_path() -> Optional[str]:
+# ── номера наших паков ─────────────────────────────────────────────────────────
+# Номер по умолчанию может быть занят чужим модом (мод-менеджеры тоже кладут pakNN в dota_russian) — тогда берём
+# следующий свободный. Выбранные имена запоминаются в paks.json, а внутри пака лежит метка ccc/<вид>.txt.
+DEFAULT_PAKS = {"marker": 67, "shop": 68, "rank": 69}
+PAKS_FILE = os.path.join(DATA_DIR, "paks.json")
+# старые версии писали паки без метки: узнаём их по содержимому (только на номере по умолчанию)
+_LEGACY = {"marker": ("particles/ui_mouseactions/", "materials/"), "shop": ("panorama/scripts/hud/dota_hud_shop",),
+           "rank": ("panorama/images/rank_tier_icons/",)}
+
+
+def _tag(kind: str) -> str:
+    return f"ccc/{kind}.txt"
+
+
+def _registry() -> Dict[str, str]:
+    try:
+        with open(PAKS_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def _remember(kind: str, name: str) -> None:
+    reg = _registry()
+    reg[kind] = name
+    try:
+        os.makedirs(DATA_DIR, exist_ok=True)
+        with open(PAKS_FILE, "w", encoding="utf-8") as f:
+            json.dump(reg, f)
+    except OSError:
+        pass
+
+
+def _is_ours(path: str, kind: str, legacy: bool = False) -> bool:
+    try:
+        names = _read_tree(path)[0]
+    except (OSError, ValueError, struct.error):
+        return False
+    if _tag(kind) in names:
+        return True
+    return legacy and bool(names) and all(n.startswith(_LEGACY[kind]) for n in names)
+
+
+def our_pak(kind: str) -> Optional[str]:
+    """Наш уже лежащий пак этого вида или None."""
     game = game_dir()
-    return os.path.join(game, LANG_DIR, PAK_NAME) if game else None
+    name = _registry().get(kind) or f"pak{DEFAULT_PAKS[kind]}_dir.vpk"
+    path = os.path.join(game, LANG_DIR, name) if game else ""
+    legacy = kind not in _registry()
+    return path if path and os.path.isfile(path) and _is_ours(path, kind, legacy) else None
+
+
+def pak_for_write(kind: str) -> Optional[str]:
+    """Куда писать пак: наш прежний файл или первый номер, не занятый чужими модами."""
+    game = game_dir()
+    if not game:
+        return None
+    current = our_pak(kind)
+    if current:
+        _remember(kind, os.path.basename(current))
+        return current
+    folder = os.path.join(game, LANG_DIR)
+    taken = {v for k, v in _registry().items() if k != kind}
+    for n in range(DEFAULT_PAKS[kind], 100):
+        name = f"pak{n}_dir.vpk"
+        if name in taken or os.path.exists(os.path.join(folder, name)) or \
+                os.path.exists(os.path.join(folder, f"pak{n}_000.vpk")):
+            continue
+        _remember(kind, name)
+        return os.path.join(folder, name)
+    return None
+
+
+def write_pak(kind: str, files: Dict[str, bytes]) -> str:
+    """Записывает наш пак (с меткой) и возвращает путь; OSError/PermissionError — наружу."""
+    path = pak_for_write(kind)
+    if not path:
+        raise OSError("нет свободного номера пака в dota_russian")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    _write_vpk(path, {**files, _tag(kind): b"CoolColorCursor\n"})
+    return path
+
+
+def remove_pak(kind: str) -> None:
+    """Удаляет только наш пак; чужой файл с тем же номером не трогаем."""
+    path = our_pak(kind)
+    if path:
+        os.remove(path)
 
 
 def is_installed() -> bool:
-    path = pak_path()
-    return bool(path) and os.path.isfile(path)
+    return bool(our_pak("marker"))
 
 
 # ── VPK ─────────────────────────────────────────────────────────────────────

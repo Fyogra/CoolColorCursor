@@ -1,4 +1,4 @@
-"""Свой вид ранга в Dota 2: родные иконки медалей и звёзд переставляются местами, пак pak69_dir.vpk в game/dota_russian.
+"""Свой вид ранга в Dota 2: родные иконки медалей и звёзд переставляются местами, пак (обычно pak69_dir.vpk) в game/dota_russian.
 
 Картинка медали общая для всех игроков этого ранга: подмена видна только у тебя, но и у других игроков с тем же
 рангом (и тем же числом звёзд) ты увидишь подменённую иконку. Файлы самой игры не меняются, выключение удаляет пак.
@@ -12,9 +12,7 @@ from typing import Dict, Optional, Tuple
 from app import dota_mod as d
 from app.config import DATA_DIR, log
 
-PAK_NAME = "pak69_dir.vpk"
-OLD_PAK = "pak32_dir.vpk"                 # чужой пак с отрисовкой рангов: конфликтует с нашим, убираем в резерв
-BACKUP_DIR = os.path.join(DATA_DIR, "backup")
+BACKUP_DIR = os.path.join(DATA_DIR, "backup", "ranks")   # сторонние паки рангов на время нашей подмены
 SETS_DIR = os.path.join(DATA_DIR, "rank_sets")  # свои наборы иконок: папка на набор, внутри файлы как в игре
 MY_SET = "Мои картинки"
 ICON_DIR = "panorama/images/rank_tier_icons/"
@@ -52,14 +50,13 @@ def _native(inner: str) -> bytes:
     return d._read_from(base, _TREE[2], inner)
 
 
-def pak_path() -> Optional[str]:
-    game = d.game_dir()
-    return os.path.join(game, d.LANG_DIR, PAK_NAME) if game else None
-
-
 def is_installed() -> bool:
-    path = pak_path()
-    return bool(path and os.path.exists(path))
+    return bool(d.our_pak("rank"))
+
+
+def lang_dir() -> Optional[str]:
+    game = d.game_dir()
+    return os.path.join(game, d.LANG_DIR) if game else None
 
 
 def _data_offset(data: bytes) -> Tuple[int, int, int]:
@@ -123,7 +120,7 @@ def _save_to_set(set_name: str, rel: str, data: bytes) -> None:
 
 
 def import_vpk(path: str) -> Tuple[bool, str]:
-    """Набор из готового пака (например, pak32): забираем из него иконки рангов. Возвращает (успех, имя/ошибка)."""
+    """Набор из готового пака рангов (.vpk): забираем из него иконки рангов. Возвращает (успех, имя/ошибка)."""
     try:
         tree = d._read_tree(path)[0]
         names = [k for k in tree if k.startswith(ICON_DIR)]
@@ -235,34 +232,37 @@ def build_files(real: str, real_stars: int, show: str, show_stars: int, set_name
     return files
 
 
-def _stash_old_pak() -> None:
-    """Чужой пак рангов (pak32) убираем в резерв, иначе игра может взять его иконки вместо наших."""
-    game = d.game_dir()
-    old = os.path.join(game, d.LANG_DIR, OLD_PAK)
-    if not os.path.exists(old):
-        return
-    try:
-        if not any(k.startswith(ICON_DIR) for k in d._read_tree(old)[0]):
-            return
-    except (OSError, ValueError, struct.error):
-        return
-    os.makedirs(BACKUP_DIR, exist_ok=True)
-    shutil.move(old, os.path.join(BACKUP_DIR, OLD_PAK))
-    log.info("Пак рангов %s убран в резерв: %s", OLD_PAK, BACKUP_DIR)
+def _stash_other_paks() -> None:
+    """Сторонние паки с иконками рангов в dota_russian убираем в резерв, иначе игра может взять их иконки вместо наших."""
+    folder = os.path.join(d.game_dir(), d.LANG_DIR)
+    ours = {d.our_pak(k) for k in d.DEFAULT_PAKS}
+    for name in sorted(os.listdir(folder)):
+        path = os.path.join(folder, name)
+        if not name.endswith("_dir.vpk") or path in ours:
+            continue
+        if os.path.exists(path.replace("_dir.vpk", "_000.vpk")):
+            continue                                       # многотомный пак — это файлы самой игры
+        try:
+            files = d._read_tree(path)[0]
+        except (OSError, ValueError, struct.error):
+            continue
+        if not files or sum(k.startswith(ICON_DIR) for k in files) * 2 < len(files):
+            continue                                       # трогаем только паки, которые почти целиком — ранги
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+        shutil.move(path, os.path.join(BACKUP_DIR, name))
+        log.info("Сторонний пак рангов %s убран в резерв: %s", name, BACKUP_DIR)
 
 
 def install(real: str, real_stars: int, show: str, show_stars: int, set_name: str = "") -> Tuple[bool, str]:
-    path = pak_path()
-    if not path:
+    if not d.game_dir():
         return False, "Не нашёл папку Dota 2."
     try:
         files = build_files(real, real_stars, show, show_stars, set_name)
         if not files:
             ok, err = uninstall(restore=False)
             return (True, "Ранг и так такой — подменять нечего.") if ok else (False, err)
-        _stash_old_pak()
-        os.makedirs(os.path.dirname(path), exist_ok=True)
-        d._write_vpk(path, files)
+        _stash_other_paks()
+        d.write_pak("rank", files)
     except PermissionError:
         return False, "Файл занят: закрой Dota 2 и попробуй снова."
     except (OSError, KeyError, ValueError, struct.error) as e:
@@ -273,14 +273,13 @@ def install(real: str, real_stars: int, show: str, show_stars: int, set_name: st
 
 
 def uninstall(restore: bool = True) -> Tuple[bool, str]:
-    """Удаляет наш пак; restore — вернуть из резерва убранный pak32."""
-    path = pak_path()
+    """Удаляет наш пак; restore — вернуть из резерва убранные сторонние паки рангов."""
     try:
-        if path and os.path.exists(path):
-            os.remove(path)
-        saved = os.path.join(BACKUP_DIR, OLD_PAK)
-        if restore and path and os.path.exists(saved):
-            shutil.move(saved, os.path.join(os.path.dirname(path), OLD_PAK))
+        d.remove_pak("rank")
+        game = d.game_dir()
+        if restore and game and os.path.isdir(BACKUP_DIR):
+            for name in os.listdir(BACKUP_DIR):
+                shutil.move(os.path.join(BACKUP_DIR, name), os.path.join(game, d.LANG_DIR, name))
     except PermissionError:
         return False, "Файл занят: закрой Dota 2 и попробуй снова."
     except OSError as e:

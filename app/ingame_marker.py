@@ -1,6 +1,6 @@
 """Свой маркер движения внутри Dota 2: шесть частиц clicked_occlusion_* с нужными цветами и шевроны вместо стрелок.
 
-Пак pak67_dir.vpk кладётся в game/dota_russian (работает при параметре запуска -language russian). Цвета лежат в
+Пак (обычно pak67_dir.vpk, если номер свободен) кладётся в game/dota_russian (работает при параметре запуска -language russian). Цвета лежат в
 самих частицах как целые числа (r, g, b). Своих частиц мы не распространяем: пользователь один раз выбирает
 пак-образец (любой пак маркера с перекрашенными clicked_occlusion_*), мы сохраняем из него эти шесть частиц,
 сами находим их цвет и дальше подставляем свои. Файлы самой игры не меняются, выключение удаляет наш пак.
@@ -229,8 +229,7 @@ def install(petals: RGB, rest: RGB, chevron: bool = True) -> Tuple[bool, str]:
         files, count = build_files(petals, rest, chevron)
         if count < len(PETAL_PARTICLES) + len(REST_PARTICLES):
             return False, "Не удалось подготовить файлы маркера: формат изменился."
-        os.makedirs(os.path.join(game, dm.LANG_DIR), exist_ok=True)
-        dm._write_vpk(os.path.join(game, dm.LANG_DIR, dm.PAK_NAME), files)
+        dm.write_pak("marker", files)
     except PermissionError:
         return False, "Файл занят: закрой Dota 2 и попробуй снова."
     except (OSError, KeyError, ValueError) as e:
@@ -240,12 +239,10 @@ def install(petals: RGB, rest: RGB, chevron: bool = True) -> Tuple[bool, str]:
 
 
 def uninstall() -> Tuple[bool, str]:
-    path = dm.pak_path()
-    if path and os.path.exists(path):
-        try:
-            os.remove(path)
-        except PermissionError:
+    try:
+        dm.remove_pak("marker")
+    except PermissionError:
             return False, "Файл занят: закрой Dota 2 и попробуй снова."
-        except OSError as e:
-            return False, f"Не получилось удалить пак: {e}"
+    except OSError as e:
+        return False, f"Не получилось удалить пак: {e}"
     return True, ""
