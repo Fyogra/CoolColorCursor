@@ -111,6 +111,21 @@ JS_TEMPLATE = r'''
 	var STANCE2 = { kez_echo_slash: "kez_falcon_rush", kez_grappling_claw: "kez_talon_toss",
 		kez_kazurai_katana: "kez_shodo_sai", kez_raptor_dance: "kez_ravens_veil" };
 	var stanceImgs = [], stance2 = false;
+	// Иконки прокачки берём у способностей своего героя в матче — так видны иконки арканы и шмоток
+	var iconImgs = [];
+
+	function bindIcons()
+	{
+		var hero = Players.GetPlayerHeroEntityIndex( Players.GetLocalPlayer() );
+		if ( hero < 0 ) { return; }
+		for ( var i = 0; i < iconImgs.length; i++ )
+		{
+			var img = iconImgs[ i ][ 0 ];
+			var ab = Entities.GetAbilityByName( hero, iconImgs[ i ][ 1 ] );
+			if ( img.IsValid() && ab >= 0 ) { img.contextEntityIndex = ab; }
+		}
+		iconImgs = [];              // не нашлась способность — остаётся стандартная иконка
+	}
 
 	function kezStance2()
 	{
@@ -253,6 +268,7 @@ JS_TEMPLATE = r'''
 					img.style.width = "26px";
 					img.style.height = "26px";
 					if ( STANCE2[ name ] ) { stanceImgs.push( [ img, name ] ); }
+					else { iconImgs.push( [ img, name ] ); }
 				}
 				var lv = label( cell, "" + sk[ i ][ 0 ], 11, "#cccccc" );
 				lv.style.horizontalAlign = "center";
@@ -366,6 +382,7 @@ JS_TEMPLATE = r'''
 				curPos = d ? d.o[ 0 ] : 0;
 				render();
 			}
+			if ( iconImgs.length ) { bindIcons(); }
 			if ( stanceImgs.length && curName == "npc_dota_hero_kez" ) { updateStance(); }
 		}
 		catch ( e ) { $.Msg( "CCC: " + e ); }
