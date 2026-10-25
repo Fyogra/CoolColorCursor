@@ -46,6 +46,7 @@ MID_UNTIL = 25 * 60           # до 25:00 — середина, дальше �
 ITEMS_PER_PHASE = 10
 SKILL_PREFIX = 10             # самая частая последовательность первых N прокачек
 SKILL_LEN = 18
+SKILL_MIN_GAMES = 8           # меньше настоящих цепочек на позиции — берём цепочки героя по всем позициям
 
 # Расходники и прочее, что не показываем после старта
 NOT_AN_ITEM_LATER = frozenset({
@@ -358,6 +359,27 @@ def skill_build(seqs: List[List[str]]) -> dict:
             break
         order.append(max(Counter(column).items(), key=lambda kv: (kv[1], kv[0]))[0])
     return {"order": order, "pct": pct, "games": len(base)}
+
+
+def skill_points(seq: List[str]) -> List[str]:
+    """Только очки в скиллы: без талантов и характеристик (их выбор не должен дробить одинаковые цепочки)."""
+    return [k for k in seq if not is_talent(k) and "attribute" not in k]
+
+
+def real_skills(games: List[dict], consts: DotaConstants) -> Dict[int, dict]:
+    """Порядок прокачки из настоящих цепочек матчей OpenDota: {позиция: skills}. Мало игр на позиции —
+    берётся порядок героя по всем позициям; совсем мало — позиции нет (останется прикидка Stratz)."""
+    seqs = {pos: [skill_points(ability_sequence(g.get("upgrades"), consts)) for g in games if g["pos"] == pos]
+            for pos in range(1, 6)}
+    every = [s for pos_seqs in seqs.values() for s in pos_seqs]
+    out = {}
+    for pos, mine in seqs.items():
+        pick = [s for s in mine if s]
+        if len(pick) < SKILL_MIN_GAMES:
+            pick = [s for s in every if s]
+        if len(pick) >= SKILL_MIN_GAMES:
+            out[pos] = dict(skill_build(pick), source="opendota")
+    return out
 
 
 def _top(counter: Counter, total: int) -> List[dict]:
@@ -708,6 +730,12 @@ class BuildsService:
                     built[p], wide = b, True
         if not any(b["item_games"] for b in built.values()):
             raise BuildsError("Stratz: по герою нет данных")
+        # Stratz не отдаёт цепочки прокачки, только прикидку; настоящие цепочки берём из матчей OpenDota
+        try:
+            for pos, skills in real_skills(self._explorer_games(hero_id), consts).items():
+                built[pos]["skills"] = skills
+        except BuildsError as e:
+            log.warning("Цепочки прокачки OpenDota для героя %s не загрузились: %s", hero_id, e)
         return {"hero_id": hero_id, "source": "stratz", "wide": wide,
                 "positions": {str(p): b for p, b in built.items()}}
 
@@ -734,17 +762,21 @@ class BuildsService:
             data["stratz_error"] = stratz_error
         return data
 
+    @staticmethod
+    def _explorer_games(hero_id: int) -> List[dict]:
+        sql = explorer_sql(hero_id, int(time.time()) - BUILDS_DAYS * 86400, BUILDS_MATCH_LIMIT)
+        resp = http_get_json(f"{OPENDOTA_API}/explorer?" + urllib.parse.urlencode({"sql": sql}), timeout=60)
+        if not isinstance(resp, dict) or resp.get("err"):
+            raise BuildsError(f"explorer: {resp.get('err') if isinstance(resp, dict) else 'нет данных'}")
+        rows = resp.get("rows")
+        if not isinstance(rows, list):
+            raise BuildsError("explorer: нет строк в ответе")
+        return games_from_rows(rows, hero_id)
+
     def _fetch_opendota(self, hero_id: int, consts: DotaConstants) -> dict:
         games, explorer_error = [], None
         try:
-            sql = explorer_sql(hero_id, int(time.time()) - BUILDS_DAYS * 86400, BUILDS_MATCH_LIMIT)
-            resp = http_get_json(f"{OPENDOTA_API}/explorer?" + urllib.parse.urlencode({"sql": sql}), timeout=60)
-            if not isinstance(resp, dict) or resp.get("err"):
-                raise BuildsError(f"explorer: {resp.get('err') if isinstance(resp, dict) else 'нет данных'}")
-            rows = resp.get("rows")
-            if not isinstance(rows, list):
-                raise BuildsError("explorer: нет строк в ответе")
-            games = games_from_rows(rows, hero_id)
+            games = self._explorer_games(hero_id)
         except BuildsError as e:
             explorer_error = str(e)
             log.warning("Explorer недоступен для героя %s: %s", hero_id, e)

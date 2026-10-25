@@ -84,8 +84,9 @@ def legalize(order: List[str], hero_id, length: int = 18) -> List[str]:
     ult_levels, length = SPECIAL.get(str(hero_id), ((6, 12, 18), length))
     wishes = [k for k in order if not _is_talent(k) and k in group_of]   # очки в характеристики и подспособности не показываем
     talents = [k for k in order if _is_talent(k)]
+    # Основные три скилла; добавки из файлов игры (шард, аганим, врождённые) качаются только если они есть в статистике
+    main = [group_of[s.split(",")[0]] for s in info["a"][:3]]
     if not wishes:                                  # по герою нет порядка прокачки — берём типовой
-        main = [g for g in groups if g != ult]
         wishes = [main[0], main[1], main[2] if len(main) > 2 else main[0]] + [main[0]] * 3 + [main[1]] * 3 + [main[2] if len(main) > 2 else main[1]] * 3
         group_of = {g: g for g in groups}
     shown = {}
@@ -93,7 +94,7 @@ def legalize(order: List[str], hero_id, length: int = 18) -> List[str]:
         shown.setdefault(group_of[k], k)
     ranks = {g: 0 for g in groups}
     queue = [group_of[k] for k in wishes]
-    fallback = sorted(groups, key=lambda g: queue.index(g) if g in queue else 99)
+    fallback = sorted((g for g in groups if g in main or g in queue), key=lambda g: queue.index(g) if g in queue else 99)
 
     def legal(g: str, level: int) -> bool:
         r = ranks[g] + 1
