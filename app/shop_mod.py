@@ -300,7 +300,7 @@ JS_TEMPLATE = r'''
 		if ( !d ) { label( root, "Нет данных для героя", 14, "#cccccc" ); return b; }
 		var tabs = $.CreatePanel( "Panel", root, "" );
 		tabs.style.flowChildren = "right";
-		tabs.style.margin = "6px 0px 4px 0px";
+		tabs.style.margin = "22px 0px 4px 0px";   // ниже стрелки «»» родного гайда в правом верхнем углу
 		tabs.style.width = "192px";
 		for ( var i = 0; i < d.o.length; i++ )
 		{
