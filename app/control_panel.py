@@ -623,7 +623,7 @@ class ControlPanel(QWidget):
             self.hud = TimerHUD()  # покажется сам, когда начнётся матч
             self.hud.positionChanged.connect(self._on_hud_moved)
             self.hud.place(self.settings.hud_pos)
-            self.alerts = AlertTracker()
+            self.alerts = AlertTracker(leads={"lotus": self.settings.lotus_alert})
             log.info("Таймеры включены")
         elif not enabled:
             self._close_hud()
@@ -774,15 +774,17 @@ class ControlPanel(QWidget):
             play_bell(self.settings.sound_file, self.settings.sound_volume)  # сразу слышно, как звучит
 
     def open_sound_dialog(self):
-        dialog = SoundDialog(self.settings.sound_file, self.settings.sound_volume, self)
+        dialog = SoundDialog(self.settings.sound_file, self.settings.sound_volume, self.settings.lotus_alert, self)
         dialog.changed.connect(self._on_sound_changed)
         dialog.move(self.geometry().center() - dialog.rect().center())
         dialog.exec_()
         dialog.deleteLater()
 
-    def _on_sound_changed(self, path: str, volume: int):
+    def _on_sound_changed(self, path: str, volume: int, lead: int):
         self.settings.sound_file = path
         self.settings.sound_volume = volume
+        self.settings.lotus_alert = lead
+        self.alerts.leads["lotus"] = lead
         self.schedule_save()
 
     def set_hud_hold_alt(self, enabled: bool):

@@ -18,16 +18,17 @@ from app.ui_common import ClickSlider, FramelessCard, SLIDER_STYLE, make_button,
 
 
 class SoundDialog(FramelessCard):
-    """Диалог «Настроить звук»: выбор WAV-файла и слайдер громкости с кнопкой «Проверить»."""
+    """Диалог «Настроить звук»: выбор WAV-файла, громкость, за сколько секунд звенеть, кнопка «Проверить»."""
 
-    changed = pyqtSignal(str, int)  # (путь, громкость) — испускается при любом применении
+    changed = pyqtSignal(str, int, int)  # (путь, громкость, секунды до лотуса) — испускается при любом применении
 
-    def __init__(self, sound_file: str, volume: int, parent=None):
-        super().__init__((420, 240), radius=16, border_width=2, parent=parent)
+    def __init__(self, sound_file: str, volume: int, lead: int = 5, parent=None):
+        super().__init__((420, 280), radius=16, border_width=2, parent=parent)
         self.body.setContentsMargins(20, 20, 20, 20)
         self.body.setSpacing(10)
         self._sound_file = sound_file
         self._volume = max(0, min(100, int(volume)))
+        self._lead = max(0, min(MAX_LEAD, int(lead)))
 
         title = QLabel("НАСТРОЙКА ЗВУКА ЛОТУСА")
         title.setFont(QFont(FONT, 11, QFont.Bold))
@@ -67,6 +68,21 @@ class SoundDialog(FramelessCard):
         vol_row.addWidget(self.slider, 1)
         self.body.addLayout(vol_row)
 
+        lead_row = QHBoxLayout()
+        self.lbl_lead = QLabel()
+        self.lbl_lead.setFont(QFont(FONT, 9, QFont.Bold))
+        self.lbl_lead.setStyleSheet(f"color: {TEXT};")
+        self.lbl_lead.setFixedWidth(90)
+        self.lbl_lead.setToolTip("За сколько секунд до появления лотуса звенеть (0 — в момент появления)")
+        self.lead_slider = ClickSlider(Qt.Horizontal)
+        self.lead_slider.setRange(0, MAX_LEAD)
+        self.lead_slider.setValue(self._lead)
+        self.lead_slider.setStyleSheet(SLIDER_STYLE)
+        self.lead_slider.valueChanged.connect(self._on_lead)
+        lead_row.addWidget(self.lbl_lead)
+        lead_row.addWidget(self.lead_slider, 1)
+        self.body.addLayout(lead_row)
+
         buttons = QHBoxLayout()
         btn_test = make_button("🔔 Проверить", height=30, font=QFont(FONT, 9, QFont.Bold),
                                style=outline_button_style(ACCENT, radius=14))
@@ -86,11 +102,12 @@ class SoundDialog(FramelessCard):
         name = os.path.basename(self._sound_file) if self._sound_file else "встроенный звон"
         self.lbl_file.setText(f"Текущий звук: {name}")
         self.lbl_vol.setText(f"Громкость: {self._volume}%")
+        self.lbl_lead.setText(f"За {self._lead} с" if self._lead else "В момент")
 
     def _set_file(self, path: str):
         self._sound_file = path
         self._refresh()
-        self.changed.emit(self._sound_file, self._volume)
+        self.changed.emit(self._sound_file, self._volume, self._lead)
 
     def _pick_file(self):
         try:
@@ -105,7 +122,12 @@ class SoundDialog(FramelessCard):
     def _on_volume(self, value: int):
         self._volume = int(value)
         self._refresh()
-        self.changed.emit(self._sound_file, self._volume)
+        self.changed.emit(self._sound_file, self._volume, self._lead)
+
+    def _on_lead(self, value: int):
+        self._lead = int(value)
+        self._refresh()
+        self.changed.emit(self._sound_file, self._volume, self._lead)
 
     def _test(self):
         play_bell(self._sound_file, self._volume)
@@ -114,6 +136,7 @@ class SoundDialog(FramelessCard):
 # ──────────────────────────────────────────────────────────────────────────────
 #  Звук: колокольчик перед лотусом
 # ──────────────────────────────────────────────────────────────────────────────
+MAX_LEAD = 30                                                    # звон лотуса: от 0 до 30 секунд до появления
 BELL_FILE = os.path.join(DATA_DIR, "lotus_bell.wav")             # встроенный звон, синтезируется один раз
 BELL_ACTIVE = os.path.join(DATA_DIR, "lotus_bell_active.wav")     # то, что реально играет: с учётом громкости
 _BELL_LOCK = threading.Lock()
@@ -267,10 +290,12 @@ def play_bell(source_path: str = "", volume: int = 70) -> None:
 
 
 class AlertTracker:
-    """Решает, когда звенеть: один раз за каждое появление объекта, за alert_before секунд до него."""
+    """Решает, когда звенеть: один раз за каждое появление объекта, за alert_before секунд до него
+    (или за столько, сколько задано в leads: {ключ таймера: секунды}, 0 — в момент появления)."""
 
-    def __init__(self, timers=TIMERS):
+    def __init__(self, timers=TIMERS, leads=None):
         self.timers = [t for t in timers if t.alert_before > 0]
+        self.leads = dict(leads or {})
         self._fired = set()
 
     def check(self, clock: Optional[float]) -> List[TimerDef]:
@@ -279,7 +304,7 @@ class AlertTracker:
         due = []
         for t in self.timers:
             left = seconds_until(clock, t.first, t.interval)
-            if 0 < left <= t.alert_before:
+            if 0 <= left <= self.leads.get(t.key, t.alert_before):
                 key = (t.key, int(round(clock + left)))  # игровая секунда появления
                 if key not in self._fired:
                     self._fired.add(key)

@@ -151,6 +151,7 @@ class Settings:
         self.sound_enabled = True    # колокольчик перед лотусом
         self.sound_file = ""         # свой WAV; пустая строка — встроенный звон
         self.sound_volume = 70       # громкость звонка, 0..100
+        self.lotus_alert = 5         # за сколько секунд до лотуса звенеть, 0..30 (0 — в момент появления)
         self.hud_hold_alt = True     # True — HUD виден только пока зажат Alt (поведение по умолчанию)
         self.only_in_dota = True     # эффект только пока в фокусе Dota 2
         self.ingame_marker = False       # свой маркер установлен в игру подменой файлов (pak67 в dota_russian)
@@ -198,6 +199,7 @@ class Settings:
         s.sound_enabled = bool(raw.get("sound_enabled", True))
         s.sound_file = str(raw.get("sound_file") or "")
         s.sound_volume = _clamp(raw.get("sound_volume", 70), 0, 100, 70)
+        s.lotus_alert = _clamp(raw.get("lotus_alert", 5), 0, 30, 5)
         s.hud_hold_alt = bool(raw.get("hud_hold_alt", True))
         s.only_in_dota = bool(raw.get("only_in_dota", True))
         s.ingame_marker = bool(raw.get("ingame_marker", False))
@@ -247,6 +249,7 @@ class Settings:
             "sound_enabled": self.sound_enabled,
             "sound_file": self.sound_file,
             "sound_volume": self.sound_volume,
+            "lotus_alert": self.lotus_alert,
             "hud_hold_alt": self.hud_hold_alt,
             "only_in_dota": self.only_in_dota,
             "ingame_marker": self.ingame_marker,
