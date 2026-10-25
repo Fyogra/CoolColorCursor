@@ -154,11 +154,11 @@ class Settings:
         self.lotus_alert = 5         # за сколько секунд до лотуса звенеть, 0..30 (0 — в момент появления)
         self.hud_hold_alt = True     # True — HUD виден только пока зажат Alt (поведение по умолчанию)
         self.only_in_dota = True     # эффект только пока в фокусе Dota 2
-        self.ingame_marker = False       # свой маркер установлен в игру подменой файлов (pak67 в dota_russian)
+        self.ingame_marker = False       # свой маркер установлен в игру подменой файлов (свой пак в dota_russian)
         self.ingame_petals = "#ff0055"   # цвет лепестков маркера в игре
         self.ingame_rest = "#00ccff"     # цвет остального (центр, свечение, кольца)
         self.ingame_chevron = True       # наша форма лепестков вместо родной стрелки
-        self.rank_mod = False            # свой вид ранга установлен в игру (pak69 в dota_russian)
+        self.rank_mod = False            # свой вид ранга установлен в игру (свой пак в dota_russian)
         self.rank_real = "5"             # настоящий ранг: медаль и звёзды
         self.rank_real_stars = 1
         self.rank_show = "8"             # каким ранг показывать

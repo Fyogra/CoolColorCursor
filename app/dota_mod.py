@@ -6,12 +6,10 @@
 from __future__ import annotations
 
 import binascii
-import json
 import os
 import re
 import struct
 from typing import Dict, Optional, Tuple
-from app.config import DATA_DIR
 from app.gsi import _steam_roots, find_dota_cfg_dir
 
 LANG_DIR = "dota_russian"
@@ -74,76 +72,116 @@ def game_dir() -> Optional[str]:
 
 
 # ── номера наших паков ─────────────────────────────────────────────────────────
-# Номер по умолчанию может быть занят чужим модом (мод-менеджеры тоже кладут pakNN в dota_russian) — тогда берём
-# следующий свободный. Выбранные имена запоминаются в paks.json, а внутри пака лежит метка ccc/<вид>.txt.
-DEFAULT_PAKS = {"marker": 67, "shop": 68, "rank": 69}
-PAKS_FILE = os.path.join(DATA_DIR, "paks.json")
-# старые версии писали паки без метки: узнаём их по содержимому (только на номере по умолчанию)
-_LEGACY = {"marker": ("particles/ui_mouseactions/", "materials/"), "shop": ("panorama/scripts/hud/dota_hud_shop",),
-           "rank": ("panorama/images/rank_tier_icons/",)}
+# Номер может быть занят чужим модом (мод-менеджеры тоже кладут pakNN в dota_russian) — тогда берём следующий
+# свободный. Свой пак узнаём по метке ccc/<вид>.txt внутри, поэтому номер нигде запоминать не нужно.
+FIRST_PAK = 68
+RESERVED = {67}                                  # pak67 занимает Minify
+DEFAULT_PAKS = {"marker": 68, "shop": 69, "rank": 70}
+# старые версии писали паки без метки под номерами 67/68/69: узнаём их по номеру и содержимому
+_LEGACY = {"marker": (67, ("particles/ui_mouseactions/", "materials/")),
+           "shop": (68, ("panorama/scripts/hud/dota_hud_shop",)),
+           "rank": (69, ("panorama/images/rank_tier_icons/",))}
 
 
 def _tag(kind: str) -> str:
     return f"ccc/{kind}.txt"
 
 
-def _registry() -> Dict[str, str]:
-    try:
-        with open(PAKS_FILE, encoding="utf-8") as f:
-            return json.load(f)
-    except (OSError, ValueError):
-        return {}
+def _names(path: str) -> set:
+    """Имена файлов в VPK: читаем только оглавление, без данных."""
+    with open(path, "rb") as f:
+        head = f.read(12)
+        sig, version, tree_size = struct.unpack("<III", head)
+        if sig != VPK_SIGNATURE or version not in (1, 2):
+            raise ValueError("не VPK")
+        data = head + f.read((0 if version == 1 else 16) + tree_size)
+    names, i = set(), 12 if version == 1 else 28
+    while True:
+        ext, i = _cstr(data, i)
+        if not ext:
+            return names
+        while True:
+            folder, i = _cstr(data, i)
+            if not folder:
+                break
+            while True:
+                name, i = _cstr(data, i)
+                if not name:
+                    break
+                preload = struct.unpack_from("<H", data, i + 4)[0]
+                i += 18 + preload
+                names.add(f"{name}.{ext}" if folder == " " else f"{folder}/{name}.{ext}")
 
 
-def _remember(kind: str, name: str) -> None:
-    reg = _registry()
-    reg[kind] = name
+def _lang_folder() -> Optional[str]:
+    game = game_dir()
+    return os.path.join(game, LANG_DIR) if game else None
+
+
+def _scan() -> Dict[str, str]:
+    """{вид: путь} наших паков в dota_russian."""
+    folder = _lang_folder()
+    found: Dict[str, str] = {}
+    legacy: Dict[str, str] = {}
     try:
-        os.makedirs(DATA_DIR, exist_ok=True)
-        with open(PAKS_FILE, "w", encoding="utf-8") as f:
-            json.dump(reg, f)
+        files = sorted(os.listdir(folder)) if folder else []
     except OSError:
-        pass
-
-
-def _is_ours(path: str, kind: str, legacy: bool = False) -> bool:
-    try:
-        names = _read_tree(path)[0]
-    except (OSError, ValueError, struct.error):
-        return False
-    if _tag(kind) in names:
-        return True
-    return legacy and bool(names) and all(n.startswith(_LEGACY[kind]) for n in names)
+        files = []
+    for fname in files:
+        m = re.fullmatch(r"pak(\d+)_dir\.vpk", fname)
+        path = os.path.join(folder, fname)
+        if not m or os.path.exists(path.replace("_dir.vpk", "_000.vpk")):
+            continue                                               # многотомные паки — файлы самой игры
+        try:
+            names = _names(path)
+        except (OSError, ValueError, struct.error):
+            continue
+        for kind in DEFAULT_PAKS:
+            if _tag(kind) in names:
+                found.setdefault(kind, path)
+            elif _LEGACY[kind][0] == int(m.group(1)) and names and                     all(n.startswith(_LEGACY[kind][1]) for n in names):
+                legacy[kind] = path
+    for kind, path in legacy.items():
+        found.setdefault(kind, path)
+    return found
 
 
 def our_pak(kind: str) -> Optional[str]:
     """Наш уже лежащий пак этого вида или None."""
-    game = game_dir()
-    name = _registry().get(kind) or f"pak{DEFAULT_PAKS[kind]}_dir.vpk"
-    path = os.path.join(game, LANG_DIR, name) if game else ""
-    legacy = kind not in _registry()
-    return path if path and os.path.isfile(path) and _is_ours(path, kind, legacy) else None
+    return _scan().get(kind)
+
+
+def _num(path: str) -> int:
+    return int(re.search(r"pak(\d+)_dir", os.path.basename(path)).group(1))
+
+
+def _free_slot(kind: str) -> Optional[str]:
+    folder = _lang_folder()
+    if not folder:
+        return None
+    for n in list(range(DEFAULT_PAKS[kind], 100)) + list(range(FIRST_PAK, DEFAULT_PAKS[kind])):
+        name = f"pak{n}_dir.vpk"
+        if n in RESERVED or os.path.exists(os.path.join(folder, name)) or                 os.path.exists(os.path.join(folder, f"pak{n}_000.vpk")):
+            continue
+        return os.path.join(folder, name)
+    return None
 
 
 def pak_for_write(kind: str) -> Optional[str]:
-    """Куда писать пак: наш прежний файл или первый номер, не занятый чужими модами."""
-    game = game_dir()
-    if not game:
-        return None
+    """Куда писать пак: наш прежний файл (если номер не зарезервирован) или первый свободный номер."""
     current = our_pak(kind)
-    if current:
-        _remember(kind, os.path.basename(current))
+    if current and _num(current) not in RESERVED:
         return current
-    folder = os.path.join(game, LANG_DIR)
-    taken = {v for k, v in _registry().items() if k != kind}
-    for n in range(DEFAULT_PAKS[kind], 100):
-        name = f"pak{n}_dir.vpk"
-        if name in taken or os.path.exists(os.path.join(folder, name)) or \
-                os.path.exists(os.path.join(folder, f"pak{n}_000.vpk")):
-            continue
-        _remember(kind, name)
-        return os.path.join(folder, name)
-    return None
+    return _free_slot(kind)
+
+
+def relocate() -> None:
+    """Наши паки на зарезервированных номерах (старые версии писали маркер в pak67) переносим на свободные."""
+    for kind, path in _scan().items():
+        if _num(path) in RESERVED:
+            new = _free_slot(kind)
+            if new:
+                os.replace(path, new)
 
 
 def write_pak(kind: str, files: Dict[str, bytes]) -> str:
