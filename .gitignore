@@ -10,3 +10,12 @@ dist/
 *.msix
 __pycache__/
 иконки/
+# данные программы (лежат рядом с ней)
+rank_sets/
+backup/
+shop_state.json
+/abilities.json
+lotus_bell.wav
+lotus_bell_active.wav
+# личные файлы
+move_marker.py

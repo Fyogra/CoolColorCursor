@@ -9,6 +9,10 @@ from PyQt5.QtWidgets import QApplication, QWidget
 from collections import deque
 from app.config import IS_WINDOWS, log
 
+VK_RBUTTON = 0x02
+WDA_EXCLUDEFROMCAPTURE = 0x11  # Windows 10 2004+: окно видно на мониторе, но не попадает в снимки экрана
+GAME_EXES = ("dota2.exe",)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Платформа (WinAPI нужен только для «сквозного» окна)
@@ -25,6 +29,20 @@ if IS_WINDOWS:
     _user32.SetWindowPos.argtypes = [wintypes.HWND, wintypes.HWND, ctypes.c_int, ctypes.c_int,
                                      ctypes.c_int, ctypes.c_int, wintypes.UINT]
     _user32.SetWindowPos.restype = wintypes.BOOL
+    _user32.GetForegroundWindow.restype = wintypes.HWND
+    _user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    _user32.GetWindowThreadProcessId.restype = wintypes.DWORD
+    _kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    _kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    _kernel32.OpenProcess.restype = wintypes.HANDLE
+    _kernel32.QueryFullProcessImageNameW.argtypes = [wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                                     ctypes.POINTER(wintypes.DWORD)]
+    _kernel32.QueryFullProcessImageNameW.restype = wintypes.BOOL
+    _kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    _user32.SetWindowDisplayAffinity.argtypes = [wintypes.HWND, wintypes.DWORD]
+    _user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
+    _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+    _user32.GetAsyncKeyState.restype = ctypes.c_short
 
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x00000020
@@ -35,6 +53,62 @@ HWND_TOPMOST = -1
 SWP_NOSIZE = 0x0001
 SWP_NOMOVE = 0x0002
 SWP_NOACTIVATE = 0x0010
+
+
+def foreground_exe() -> str:
+    """Имя exe окна, которое сейчас в фокусе (нижний регистр), или пустая строка."""
+    if not IS_WINDOWS:
+        return ""
+    try:
+        pid = wintypes.DWORD(0)
+        _user32.GetWindowThreadProcessId(_user32.GetForegroundWindow(), ctypes.byref(pid))
+        if not pid.value:
+            return ""
+        handle = _kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ""
+        try:
+            buf, size = ctypes.create_unicode_buffer(520), wintypes.DWORD(520)
+            if _kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
+                return buf.value.replace("/", "\\").rsplit("\\", 1)[-1].lower()
+        finally:
+            _kernel32.CloseHandle(handle)
+    except Exception:  # noqa: BLE001 — не критично: считаем, что игры нет
+        pass
+    return ""
+
+
+def right_button_down() -> bool:
+    return IS_WINDOWS and bool(_user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000)
+
+
+class GameFocus:
+    """В фокусе только Dota 2: ни в панели настроек, ни в других окнах эффекта нет.
+    Проверка не чаще 4 раз в секунду; only_in_dota=False — считаем, что фокус есть всегда."""
+
+    def __init__(self):
+        self.only_in_dota = True
+        self._ok, self._at = True, 0.0
+
+    def __call__(self, now: float) -> bool:
+        if not self.only_in_dota:
+            return True
+        if now - self._at >= 0.25:
+            self._at = now
+            exe = foreground_exe()
+            self._ok = exe in GAME_EXES
+        return self._ok
+
+
+def exclude_from_capture(widget: QWidget) -> None:
+    """Окно остаётся на экране, но пропадает из снимков экрана и записи."""
+    if not IS_WINDOWS:
+        return
+    try:
+        if not _user32.SetWindowDisplayAffinity(int(widget.winId()), WDA_EXCLUDEFROMCAPTURE):
+            log.warning("Не удалось скрыть окно от захвата экрана (нужна Windows 10 2004 или новее)")
+    except Exception as e:  # noqa: BLE001
+        log.warning("Скрытие окна от захвата: %s", e)
 
 
 def apply_overlay_style(widget: QWidget, *, click_through: bool) -> None:
@@ -90,6 +164,7 @@ class MouseTrailOverlay(QWidget):
         self._last_pos = None
         self._last_tick = time.monotonic()
         self._dirty = QRect()  # где шлейф был нарисован в прошлый раз
+        self.focus = GameFocus()  # рисовать только пока в фокусе Dota 2 (если включено)
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowTransparentForInput
                             | Qt.WindowStaysOnTopHint)
@@ -143,6 +218,12 @@ class MouseTrailOverlay(QWidget):
     # ── логика шлейфа ───────────────────────────────────────────────────────
     def _tick(self):
         now = time.monotonic()
+        if not self.focus(now):
+            self._last_tick = now
+            if self.points:
+                self.points.clear()
+                self._invalidate()
+            return
         cur = QPointF(self.mapFromGlobal(QCursor.pos()))
 
         # Защита от фризов (UAC, нагрузка на систему): не тянем линию через весь экран
@@ -201,12 +282,14 @@ class MouseTrailOverlay(QWidget):
         p.fillRect(event.rect(), QColor(0, 0, 0, 0))
         p.setCompositionMode(QPainter.CompositionMode_SourceOver)
 
+        p.setRenderHint(QPainter.Antialiasing, True)
+        now = time.monotonic()
+        self._paint_trail(p, now)
+
+    def _paint_trail(self, p: QPainter, now: float) -> None:
         points = self.points
         if len(points) < 2:
             return
-        p.setRenderHint(QPainter.Antialiasing, True)
-
-        now = time.monotonic()
         r1, g1, b1 = self.color1.red(), self.color1.green(), self.color1.blue()
         r2, g2, b2 = self.color2.red(), self.color2.green(), self.color2.blue()
 

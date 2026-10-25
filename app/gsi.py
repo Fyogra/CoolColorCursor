@@ -36,6 +36,7 @@ GSI_CFG_TEXT = f'''"CCC Dota Timers"
         "provider"    "1"
         "map"         "1"
         "hero"        "1"
+        "abilities"   "1"
     }}
 }}
 '''
@@ -103,6 +104,7 @@ class Snapshot:
     status: str
     clock: Optional[float]  # игровое время в секундах; None, если матча нет
     hero_id: int = 0        # герой игрока (появляется уже на стадии пика); 0 — неизвестен
+    ability0: str = ""      # способность в первом слоте (у Кеза по ней видна стойка)
 
 
 class GameState:
@@ -120,13 +122,18 @@ class GameState:
             self._paused = False
             self._last_packet: Optional[float] = None
             self._hero_id = 0
+            self._ability0 = ""
 
     def update(self, payload: dict) -> None:
         now = time.monotonic()
         game_map = payload.get("map")
         hero = payload.get("hero")
         hero_id = hero.get("id") if isinstance(hero, dict) else None
+        abilities = payload.get("abilities")
+        first = abilities.get("ability0") if isinstance(abilities, dict) else None
+        ability0 = str(first.get("name") or "") if isinstance(first, dict) else ""
         with self._lock:
+            self._ability0 = ability0
             self._last_packet = now
             self._hero_id = hero_id if isinstance(hero_id, int) and not isinstance(hero_id, bool) \
                 and hero_id > 0 else 0
@@ -149,13 +156,13 @@ class GameState:
                 return Snapshot(OFFLINE, None)
             if now - self._last_packet > STALE_AFTER:
                 return Snapshot(STALE, None)
-            hero = self._hero_id
+            hero, ab0 = self._hero_id, self._ability0
             if self._clock is None or self._game_state not in (_STATE_PREGAME, _STATE_LIVE):
-                return Snapshot(IDLE, None, hero)
+                return Snapshot(IDLE, None, hero, ab0)
             if self._paused:
-                return Snapshot(PAUSED, self._clock, hero)  # на паузе время стоит
+                return Snapshot(PAUSED, self._clock, hero, ab0)  # на паузе время стоит
             clock = self._clock + (now - self._received)
-            return Snapshot(PREGAME if self._game_state == _STATE_PREGAME else LIVE, clock, hero)
+            return Snapshot(PREGAME if self._game_state == _STATE_PREGAME else LIVE, clock, hero, ab0)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

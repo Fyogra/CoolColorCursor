@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import math
 import random
-from PyQt5.QtCore import QPointF, QRectF, QTimer, Qt, pyqtSignal
+from PyQt5.QtCore import QEasingCurve, QPointF, QPropertyAnimation, QRectF, QTimer, Qt, pyqtProperty, pyqtSignal
 from PyQt5.QtGui import QBrush, QColor, QConicalGradient, QFont, QPainter, QPainterPath, QPen, QRadialGradient
 from PyQt5.QtWidgets import QDialog, QFrame, QHBoxLayout, QLabel, QPushButton, QSlider, QStyle, QStyleOptionSlider, QVBoxLayout, QWidget
 from app.config import ACCENT, BG, BORDER, FONT, MUTED, TEXT
@@ -68,7 +68,7 @@ def readable_text_color(bg: QColor) -> str:
 class FramelessCard(QDialog):
     """Безрамочный диалог с тёмной скруглённой карточкой. Содержимое — в self.body."""
 
-    def __init__(self, size, radius, border_width, parent=None):
+    def __init__(self, size, radius, border_width, parent=None, starry: bool = False):
         super().__init__(parent)
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Tool | Qt.WindowStaysOnTopHint)
         self.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -77,10 +77,14 @@ class FramelessCard(QDialog):
         outer = QVBoxLayout(self)
         outer.setContentsMargins(10, 10, 10, 10)
 
-        card = QFrame(self)
-        card.setObjectName("card")  # селектор по имени, чтобы стиль не «протекал» на QLabel
-        card.setStyleSheet(f"#card {{ background-color: {BG}; border-radius: {radius}px;"
-                           f" border: {border_width}px solid {ACCENT}; }}")
+        if starry:                  # фон со звёздами, как у главного окна
+            card = StarryBackground(self)
+            card.RADIUS = radius
+        else:
+            card = QFrame(self)
+            card.setObjectName("card")  # селектор по имени, чтобы стиль не «протекал» на QLabel
+            card.setStyleSheet(f"#card {{ background-color: {BG}; border-radius: {radius}px;"
+                               f" border: {border_width}px solid {ACCENT}; }}")
         outer.addWidget(card)
         self.body = QVBoxLayout(card)
 
@@ -238,6 +242,56 @@ class ColorPickerWindow(FramelessCard):
 
         self.set_color(initial_color)
 
+        # Выезд: окно проезжает SLIDE_PX от панели на своё место и плавно проявляется
+        self._anchor = (0, 0)
+        self._dir = -1
+        self._t = 0.0
+        self._closing = False
+        self.setWindowOpacity(0.0)
+        self._anim = QPropertyAnimation(self, b"slide", self)
+        self._anim.setDuration(self.SLIDE_MS)
+        self._anim.setEasingCurve(QEasingCurve.OutCubic)
+
+    SLIDE_PX, SLIDE_MS = 36, 220
+
+    def _get_slide(self) -> float:
+        return self._t
+
+    def _set_slide(self, value: float):
+        self._t = value
+        self.setWindowOpacity(value)
+        self._apply_pos()
+
+    slide = pyqtProperty(float, _get_slide, _set_slide)
+
+    def _apply_pos(self):
+        x, y = self._anchor
+        self.move(int(x + self._dir * self.SLIDE_PX * (1.0 - self._t)), y)
+
+    def set_anchor(self, x: int, y: int, direction: int) -> None:
+        """Место окна; direction: -1 — окно справа от панели (выезжает слева), +1 — слева (выезжает справа)."""
+        self._anchor, self._dir = (x, y), direction
+        self._apply_pos()
+
+    def slide_in(self) -> None:
+        self._anim.stop()
+        self._anim.setStartValue(self._t)
+        self._anim.setEndValue(1.0)
+        self.show()
+        self._anim.start()
+
+    def closeEvent(self, event):
+        if self._closing or not self.isVisible():
+            super().closeEvent(event)
+            return
+        event.ignore()  # сначала плавно задвигаем, потом закрываем по-настоящему
+        self._closing = True
+        self._anim.stop()
+        self._anim.setStartValue(self._t)
+        self._anim.setEndValue(0.0)
+        self._anim.finished.connect(self.close)
+        self._anim.start()
+
     def _on_value_changed(self, value: int):
         self.wheel.set_value(value / 100.0)
         self.colorPicked.emit(self.wheel.current_color)
@@ -289,7 +343,7 @@ class AutostartDialog(FramelessCard):
 #  Информационное окно
 # ──────────────────────────────────────────────────────────────────────────────
 class InfoDialog(FramelessCard):
-    def __init__(self, title: str, text: str, parent=None, size=(460, 290)):
+    def __init__(self, title: str, text: str, parent=None, size=(460, 290), ok: str = "ОК", cancel: str = ""):
         super().__init__(size, radius=16, border_width=2, parent=parent)
         self.body.setContentsMargins(20, 20, 20, 20)
         self.body.setSpacing(12)
@@ -306,14 +360,25 @@ class InfoDialog(FramelessCard):
         lbl_text.setAlignment(Qt.AlignCenter)
         lbl_text.setTextInteractionFlags(Qt.TextSelectableByMouse)  # путь можно выделить и скопировать
 
-        btn_ok = make_button("ОК", height=32, font=QFont(FONT, 9, QFont.Bold), style=(
+        btn_ok = make_button(ok, height=32, font=QFont(FONT, 9, QFont.Bold), style=(
             f"QPushButton {{ background: {ACCENT}; color: #000; border: none; border-radius: 8px; }}"
             " QPushButton:hover { background: #00cc99; }"))
         btn_ok.clicked.connect(self.accept)
 
         self.body.addWidget(lbl_title)
         self.body.addWidget(lbl_text, 1)
-        self.body.addWidget(btn_ok)
+        if cancel:  # вопрос: «Отмена» слева, подтверждение справа
+            btn_cancel = make_button(cancel, height=32, font=QFont(FONT, 9), style=(
+                f"QPushButton {{ background: transparent; color: {TEXT}; border: 1px solid {MUTED};"
+                " border-radius: 8px; } QPushButton:hover { background: #222233; }"))
+            btn_cancel.clicked.connect(self.reject)
+            row = QHBoxLayout()
+            row.setSpacing(10)
+            row.addWidget(btn_cancel)
+            row.addWidget(btn_ok)
+            self.body.addLayout(row)
+        else:
+            self.body.addWidget(btn_ok)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
