@@ -47,6 +47,7 @@ ITEMS_PER_PHASE = 10
 SKILL_PREFIX = 10             # самая частая последовательность первых N прокачек
 SKILL_LEN = 18
 SKILL_MIN_GAMES = 8           # меньше настоящих цепочек на позиции — берём цепочки героя по всем позициям
+SKILL_DAYS_WIDER = 180        # герой редкий в про-сцене — цепочки за полгода
 
 # Расходники и прочее, что не показываем после старта
 NOT_AN_ITEM_LATER = frozenset({
@@ -731,11 +732,8 @@ class BuildsService:
         if not any(b["item_games"] for b in built.values()):
             raise BuildsError("Stratz: по герою нет данных")
         # Stratz не отдаёт цепочки прокачки, только прикидку; настоящие цепочки берём из матчей OpenDota
-        try:
-            for pos, skills in real_skills(self._explorer_games(hero_id), consts).items():
-                built[pos]["skills"] = skills
-        except BuildsError as e:
-            log.warning("Цепочки прокачки OpenDota для героя %s не загрузились: %s", hero_id, e)
+        for pos, skills in self.real_skills(hero_id, consts).items():
+            built[pos]["skills"] = skills
         return {"hero_id": hero_id, "source": "stratz", "wide": wide,
                 "positions": {str(p): b for p, b in built.items()}}
 
@@ -762,9 +760,24 @@ class BuildsService:
             data["stratz_error"] = stratz_error
         return data
 
+    def real_skills(self, hero_id: int, consts: DotaConstants) -> Dict[int, dict]:
+        """Настоящие цепочки прокачки OpenDota по позициям; не загрузились — {} (останется прикидка Stratz)."""
+        for attempt in range(2):
+            try:
+                games = self._explorer_games(hero_id)
+                if len(games) < SKILL_MIN_GAMES:
+                    games = self._explorer_games(hero_id, SKILL_DAYS_WIDER)
+                return real_skills(games, consts)
+            except BuildsError as e:
+                log.warning("Цепочки прокачки OpenDota для героя %s не загрузились: %s", hero_id, e)
+                if attempt or "много запросов" not in str(e):
+                    return {}
+                time.sleep(61)                       # минутный лимит OpenDota
+        return {}
+
     @staticmethod
-    def _explorer_games(hero_id: int) -> List[dict]:
-        sql = explorer_sql(hero_id, int(time.time()) - BUILDS_DAYS * 86400, BUILDS_MATCH_LIMIT)
+    def _explorer_games(hero_id: int, days: int = BUILDS_DAYS) -> List[dict]:
+        sql = explorer_sql(hero_id, int(time.time()) - days * 86400, BUILDS_MATCH_LIMIT)
         resp = http_get_json(f"{OPENDOTA_API}/explorer?" + urllib.parse.urlencode({"sql": sql}), timeout=60)
         if not isinstance(resp, dict) or resp.get("err"):
             raise BuildsError(f"explorer: {resp.get('err') if isinstance(resp, dict) else 'нет данных'}")
