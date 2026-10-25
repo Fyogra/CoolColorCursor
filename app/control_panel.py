@@ -2,42 +2,61 @@
 from __future__ import annotations
 
 import os
+import random
 import threading
+import time
+from datetime import date
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
 from typing import Optional
+from app import dota_mod, ingame_marker, rank_mod, shop_mod
+from app.rank_window import RankDialog
+from app.egg import EggDialog, EggTrigger
+from app.marker_window import MarkerDialog
 from app.builds_data import BuildsService
-from app.builds_window import BuildsWindow, GoldClickWatcher, ImageCache, ShopDetector
+from app.builds_window import STANCE2, BuildsWindow, GoldClickWatcher, ImageCache, ShopDetector
 from app.config import ACCENT, APP_TITLE, BG, CONFIG_FILE, DANGER, DATA_DIR, DIM, FONT, FONT_SYMBOL, HISTORY_SIZE, IS_WINDOWS, Settings, log, set_autostart
 from app.gsi import GSIServer, LIVE, OFFLINE, PREGAME, Snapshot, format_clock, install_gsi_config, refresh_installed_gsi_config
 from app.hud import LauncherIcon, STATUS_TEXT, TimerHUD
 from app.icon import app_icon
 from app.sound import AlertTracker, SoundDialog, VK_ALT, ensure_bell, is_key_down, play_bell
-from app.trail import MouseTrailOverlay, keep_on_top
+from app.trail import GameFocus, MouseTrailOverlay, keep_on_top
 from app.ui_common import AutostartDialog, ClickSlider, ColorPickerWindow, DragHeader, InfoDialog, SLIDER_STYLE, StarryBackground, caption, gradient_button_style, make_button, outline_button_style, readable_text_color
 
 
 # ──────────────────────────────────────────────────────────────────────────────
 #  Главная панель
 # ──────────────────────────────────────────────────────────────────────────────
+def daily_presets(day: date, count: int = 5) -> list:
+    """Пресеты на день: часть однотонных, часть двухцветных, оттенки случайные, но зависят только от даты."""
+    rnd = random.Random(day.isoformat())
+    solid = rnd.randint(2, 3)
+    out = []
+    for i in range(count):
+        hue = rnd.random()
+        c1 = QColor.fromHsvF(hue, rnd.uniform(0.75, 1.0), 1.0).name()
+        if i < solid:
+            out.append((c1, c1))
+        else:
+            shift = rnd.choice((-1, 1)) * rnd.uniform(0.12, 0.5)  # от соседнего до почти противоположного оттенка
+            c2 = QColor.fromHsvF((hue + shift) % 1.0, rnd.uniform(0.75, 1.0), rnd.uniform(0.7, 1.0)).name()
+            out.append((c1, c2))
+    rnd.shuffle(out)
+    return out
+
+
 class ControlPanel(QWidget):
-    WIDTH, HEIGHT = 380, 600
+    WIDTH, HEIGHT = 380, 640
 
     QUICK_COLORS = ("#ff0055", "#ff6600", "#ffcc00", "#00ffc8", "#00ccff", "#0055ff", "#9d00ff", "#ffffff")
-    PRESETS = (
-        ("#00ccff", "#ff0080"),
-        ("#9d00ff", "#00fff0"),
-        ("#ff6600", "#ff0000"),
-        ("#00ff00", "#003300"),
-        ("#ff00ff", "#4b0082"),
-    )
-
     def __init__(self):
         super().__init__()
         log.info("Инициализация интерфейса")
         self.picker = None
         self.overlay = None
+        self.game_focus = GameFocus()  # оверлеи (таймеры, иконка, сборки) видны только пока активна Dota 2
+        self._focus_hidden = []        # окна, которые мы спрятали, когда игра ушла из фокуса
         self.hud = None          # панель таймеров Dota 2
         self.gsi = GSIServer()
         self.btn_timers = None
@@ -74,6 +93,13 @@ class ControlPanel(QWidget):
 
         self._build_ui()
         self._build_tray()
+        self._ensure_ingame_marker()
+        self._ensure_rank_mod()
+        self._shop_busy = False
+        self._shop_timer = QTimer(self)
+        self._shop_timer.timeout.connect(self._refresh_shop_pack)
+        self._shop_timer.start(30 * 60 * 1000)
+        QTimer.singleShot(15000, self._refresh_shop_pack)
         self._restore_timers()
         self._restore_launcher()
 
@@ -120,10 +146,23 @@ class ControlPanel(QWidget):
         title = QLabel(APP_TITLE)
         title.setFont(QFont(FONT, 11, QFont.Bold))
         title.setStyleSheet(f"color: {ACCENT}; background: transparent;")
+        self._egg_trigger = EggTrigger()
+
+        def title_press(event):
+            event.ignore()                                  # перетаскивание окна остаётся за шапкой
+            if self._egg_trigger.hit():
+                self._egg = EggDialog()
+                self._egg.show()
+        title.mousePressEvent = title_press
         header_layout.addWidget(title)
         header_layout.addStretch()
-        header_layout.addWidget(self._window_button("─", 9, ACCENT, self.hide_to_tray))
-        header_layout.addWidget(self._window_button("✕", 10, DANGER, self.quit_app))
+        # «─» прячет в трей, а полный выход — отдельная кнопка и пункт меню трея
+        btn_tray = self._window_button("─", 9, ACCENT, self.hide_to_tray)
+        btn_tray.setToolTip("Свернуть в трей (программа продолжит работать)")
+        btn_quit = self._window_button("⏻", 10, DANGER, self.quit_app)
+        btn_quit.setToolTip("Выйти из программы полностью")
+        header_layout.addWidget(btn_tray)
+        header_layout.addWidget(btn_quit)
         root.addWidget(header)
 
         # Слайдеры
@@ -178,12 +217,10 @@ class ControlPanel(QWidget):
 
         # Пресеты
         root.addWidget(caption("ГОТОВЫЕ ПРЕСЕТЫ"))
-        presets = QHBoxLayout()
-        for c1, c2 in self.PRESETS:
-            btn = make_button(size=(56, 22), style=gradient_button_style(c1, c2))
-            btn.clicked.connect(lambda _=False, a=c1, b=c2: self.apply_preset(a, b))
-            presets.addWidget(btn)
-        root.addLayout(presets)
+        self.presets_row = QHBoxLayout()
+        self._presets_day = None
+        self._fill_presets()
+        root.addLayout(self.presets_row)
 
         # Dota 2
         root.addWidget(caption("DOTA 2"))
@@ -213,6 +250,19 @@ class ControlPanel(QWidget):
         dota2.addWidget(self.btn_sound)
         dota2.addWidget(btn_sound_settings)
         root.addLayout(dota2)
+
+        mods = QHBoxLayout()
+        btn_marker = make_button("🎯 МАРКЕР КЛИКА", height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
+                                 style=outline_button_style(ACCENT, radius=15))
+        btn_marker.setToolTip("Свой цвет и форма маркера движения внутри игры (замена файлов)")
+        btn_marker.clicked.connect(self.open_marker_dialog)
+        btn_rank = make_button("🏅 РАНГ В DOTA 2", height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
+                               style=outline_button_style(ACCENT, radius=15))
+        btn_rank.setToolTip("Показывать свой ранг другой медалью (замена файлов, видишь только ты)")
+        btn_rank.clicked.connect(self.open_rank_dialog)
+        mods.addWidget(btn_marker, 1)
+        mods.addWidget(btn_rank, 1)
+        root.addLayout(mods)
 
         self.lbl_gsi = caption("", size=9, color=DIM)
         root.addWidget(self.lbl_gsi)
@@ -278,6 +328,13 @@ class ControlPanel(QWidget):
         self.act_hold_alt.setChecked(self.settings.hud_hold_alt)
         self.act_hold_alt.toggled.connect(self.set_hud_hold_alt)
         menu.addAction("Вернуть таймеры под часы игры").triggered.connect(self.reset_hud_position)
+        self.act_only_dota = menu.addAction("Эффект только в Dota 2")
+        self.act_only_dota.setCheckable(True)
+        self.act_only_dota.setChecked(self.settings.only_in_dota)
+        self.act_only_dota.toggled.connect(self.set_only_in_dota)
+        self.act_only_dota.setVisible(False)  # всегда только в Dota 2
+        menu.addAction("Маркер внутри Dota 2…").triggered.connect(self.open_marker_dialog)
+        menu.addAction("Ранг в Dota 2…").triggered.connect(self.open_rank_dialog)
         self.act_auto = menu.addAction("Автооткрытие сборок при магазине")
         self.act_auto.setCheckable(True)
         self.act_auto.setChecked(self.settings.builds_auto)
@@ -322,7 +379,8 @@ class ControlPanel(QWidget):
         self.hide()
         if not self._tray_hint_shown:
             self._tray_hint_shown = True
-            self.tray.showMessage(APP_TITLE, "Приложение свернуто в трей.", app_icon(), 1500)
+            self.tray.showMessage(APP_TITLE, "Программа продолжает работать в трее. Выход — правой кнопкой по значку → «Выход».",
+                                  app_icon(), 4000)
 
     def show_from_tray(self):
         self.show()
@@ -347,11 +405,9 @@ class ControlPanel(QWidget):
         QApplication.quit()
 
     def closeEvent(self, event):
-        if self._quitting:
-            event.accept()
-        else:  # Alt+F4 не должен убивать приложение — сворачиваем в трей
-            event.ignore()
-            self.hide_to_tray()
+        event.accept()
+        if not self._quitting:  # Alt+F4 завершает программу полностью, в трей прячет только ✕
+            self.quit_app()
 
     # ── автозапуск ──────────────────────────────────────────────────────────
     def _set_autostart_check(self, checked: bool):
@@ -393,7 +449,7 @@ class ControlPanel(QWidget):
         self.picker.finished.connect(self._on_picker_closed)
         self.btn_arrow.setText("◀")
         self._place_picker()
-        self.picker.show()
+        self.picker.slide_in()
 
     def _on_picker_closed(self):
         self.picker = None
@@ -406,11 +462,11 @@ class ControlPanel(QWidget):
         screen = QApplication.screenAt(frame.center()) or QApplication.primaryScreen()
         area = screen.availableGeometry()
 
-        x = frame.right() + 10
+        x, direction = frame.right() + 10, -1
         if x + self.picker.width() > area.right():  # справа нет места — ставим слева
-            x = frame.left() - self.picker.width() - 10
+            x, direction = frame.left() - self.picker.width() - 10, 1
         y = max(area.top(), min(frame.top(), area.bottom() - self.picker.height()))
-        self.picker.move(x, y)
+        self.picker.set_anchor(x, y, direction)
 
     def moveEvent(self, event):
         super().moveEvent(event)
@@ -449,6 +505,22 @@ class ControlPanel(QWidget):
 
         self._refresh_history_ui()
         self.schedule_save()
+
+    def _fill_presets(self):
+        """Пресеты дня: набор случайный, но одинаковый в течение суток, а завтра будет новый."""
+        today = date.today()
+        if self._presets_day == today:
+            return
+        self._presets_day = today
+        while self.presets_row.count():
+            item = self.presets_row.takeAt(0)
+            if item.widget() is not None:
+                item.widget().deleteLater()
+        for c1, c2 in daily_presets(today):
+            btn = make_button(size=(56, 22), style=gradient_button_style(c1, c2))
+            btn.setToolTip("Однотонный" if c1 == c2 else "Двухцветный")
+            btn.clicked.connect(lambda _=False, a=c1, b=c2: self.apply_preset(a, b))
+            self.presets_row.addWidget(btn)
 
     def apply_preset(self, c1, c2):
         self.settings.colors = [QColor(c1), QColor(c2)]
@@ -594,8 +666,10 @@ class ControlPanel(QWidget):
             log.info("GSI: статус %s, герой %s", snap.status, snap.hero_id)
             self._last_status = snap.status
 
+        in_game = self._apply_game_focus()
+
         # Таймеры: по Alt (если включено) или всегда
-        if self.hud is not None:
+        if self.hud is not None and in_game:
             visible = (not self.settings.hud_hold_alt) or is_key_down(VK_ALT)
             self.hud.update_from(snap, visible_override=visible)
             due = self.alerts.check(snap.clock)  # и с выключенным звуком — чтобы не звенеть задним числом
@@ -603,11 +677,14 @@ class ControlPanel(QWidget):
                 play_bell(self.settings.sound_file, self.settings.sound_volume)
 
         # Сборки: герой из игры подхватывается автоматически
-        if self.builds is not None:
+        if self.builds is not None and in_game:
             self.builds.follow_game_hero(snap.hero_id)
+            self.builds.set_stance2(snap.ability0 in STANCE2.values())
 
         # Автодетект магазина: только в активном матче (не на паузе, не на базе загрузки)
-        if self.settings.builds_auto and snap.status in (LIVE, PREGAME):
+        if not in_game:
+            pass
+        elif self.settings.builds_auto and snap.status in (LIVE, PREGAME):
             # Клик по золоту — моментально открываем сборки, не дожидаясь детектора
             if self.gold_watcher.check(self.settings.builds_gold_zone):
                 self._auto_show_builds("right")
@@ -627,9 +704,29 @@ class ControlPanel(QWidget):
         elif self._builds_auto_shown and self.builds is not None:
             self._auto_hide_builds()
 
+        if self._ticks % 300 == 0:  # раз в минуту: наступили новые сутки — обновляем пресеты
+            self._fill_presets()
         if self._ticks % 10 == 0:  # раз в ~2 секунды: игра в окне без рамки может перехватить верхний слой
             self._raise_overlays()
         self._refresh_gsi_status(snap)
+
+    def _apply_game_focus(self) -> bool:
+        """Прячет наши оверлеи, пока Dota 2 не в фокусе, и возвращает их, когда она вернулась.
+        Свои оверлеи, на которые нажал сам игрок, считаются «в игре» — иначе ими нельзя пользоваться."""
+        active = QApplication.activeWindow()
+        overlays = (self.hud, self.launcher, self.builds)
+        in_game = self.game_focus(time.monotonic()) or any(active is w for w in overlays if w is not None)
+        if in_game:
+            for w in self._focus_hidden:
+                if any(w is o for o in overlays) and not w.isVisible():
+                    w.show()
+            self._focus_hidden = []
+        else:
+            for w in overlays:
+                if w is not None and w.isVisible():
+                    w.hide()
+                    self._focus_hidden.append(w)
+        return in_game
 
     def _auto_show_builds(self, side: str):
         """Открывает окно сборок рядом с магазином. Запоминает, что открыли мы, не пользователь."""
@@ -691,6 +788,140 @@ class ControlPanel(QWidget):
     def set_hud_hold_alt(self, enabled: bool):
         self.settings.hud_hold_alt = enabled
         self.schedule_save()
+
+    def set_only_in_dota(self, enabled: bool):
+        self.settings.only_in_dota = True  # переключатель убран: оверлей работает исключительно в Dota 2
+        self.schedule_save()
+
+    def open_marker_dialog(self):
+        s = self.settings
+        dialog = MarkerDialog(s.ingame_petals, s.ingame_rest, s.ingame_chevron, dota_mod.is_installed(),
+                              self._install_ingame_marker, self._remove_ingame_marker, self)
+        dialog.move(self.geometry().center() - dialog.rect().center())
+        dialog.exec_()
+        dialog.deleteLater()
+
+    def _install_ingame_marker(self, petals: str, rest: str, chevron: bool):
+        text = ("Это замена файлов Dota 2. Используете на свой страх и риск: "
+                "мы не несём никакой ответственности за ваш аккаунт.\n\n"
+                f"Нужен параметр запуска Steam «{dota_mod.LAUNCH_OPTION}». Файлы игры не меняются, "
+                "в папку dota_russian кладётся один наш файл, кнопка «Вернуть как было» его удаляет.")
+        if not self.settings.ingame_marker and not self._ask("ЗАМЕНА ФАЙЛОВ DOTA 2", text, "Согласен"):
+            return False, "Отменено."
+        def rgb(hex_code):
+            c = QColor(hex_code)
+            return c.red(), c.green(), c.blue()
+        ok, err = ingame_marker.install(rgb(petals), rgb(rest), chevron)
+        if not ok:
+            return False, err
+        s = self.settings
+        s.ingame_marker, s.ingame_petals, s.ingame_rest, s.ingame_chevron = True, petals, rest, chevron
+        self.schedule_save()
+        if dota_mod.launch_option_set() is False:
+            return True, f"В параметрах запуска Dota 2 в Steam нет «{dota_mod.LAUNCH_OPTION}», без него подмена не сработает."
+        return True, ""
+
+    def _remove_ingame_marker(self):
+        ok, err = ingame_marker.uninstall()
+        if ok:
+            self.settings.ingame_marker = False
+            self.schedule_save()
+        return ok, err
+
+    def _ensure_ingame_marker(self):
+        """Пак мог пропасть (проверка файлов в Steam) — если свой маркер включён, ставим заново."""
+        s = self.settings
+        if s.ingame_marker and not dota_mod.is_installed() and dota_mod.game_dir():
+            def rgb(hex_code):
+                c = QColor(hex_code)
+                return c.red(), c.green(), c.blue()
+            ingame_marker.install(rgb(s.ingame_petals), rgb(s.ingame_rest), s.ingame_chevron)
+
+    def open_rank_dialog(self):
+        s = self.settings
+        dialog = RankDialog((s.rank_real, s.rank_real_stars), (s.rank_show, s.rank_show_stars), s.rank_set, rank_mod.is_installed(),
+                            self._install_rank_mod, self._remove_rank_mod, self)
+        dialog.move(self.geometry().center() - dialog.rect().center())
+        dialog.exec_()
+        dialog.deleteLater()
+
+    def _install_rank_mod(self, real: str, real_stars: int, show: str, show_stars: int, set_name: str = ""):
+        text = ("Это замена файлов Dota 2. Используете на свой страх и риск: "
+                "мы не несём никакой ответственности за ваш аккаунт.\n\n"
+                "Меняется только картинка у тебя на экране: настоящий ранг и то, что видят другие, не меняются. "
+                f"Нужен параметр запуска Steam «{dota_mod.LAUNCH_OPTION}». Файлы игры не меняются, "
+                "в папку dota_russian кладётся один наш файл, кнопка «Вернуть как было» его удаляет.")
+        if not self.settings.rank_mod and not self._ask("ЗАМЕНА ФАЙЛОВ DOTA 2", text, "Согласен"):
+            return False, "Отменено."
+        ok, err = rank_mod.install(real, real_stars, show, show_stars, set_name)
+        if not ok:
+            return False, err
+        s = self.settings
+        s.rank_set = set_name
+        s.rank_mod = rank_mod.is_installed()
+        s.rank_real, s.rank_real_stars, s.rank_show, s.rank_show_stars = real, real_stars, show, show_stars
+        s.rank_game = shop_mod._game_signature()
+        self.schedule_save()
+        if dota_mod.launch_option_set() is False:
+            return True, f"В параметрах запуска Dota 2 в Steam нет «{dota_mod.LAUNCH_OPTION}», без него подмена не сработает."
+        return True, err
+
+    def _remove_rank_mod(self):
+        ok, err = rank_mod.uninstall()
+        if ok:
+            self.settings.rank_mod = False
+            self.schedule_save()
+        return ok, err
+
+    def _ensure_rank_mod(self):
+        """Пак пропал или игра обновилась — собираем заново из свежих иконок (при открытой Dota — в другой раз)."""
+        s = self.settings
+        if not s.rank_mod or not dota_mod.game_dir():
+            return
+        game = shop_mod._game_signature()
+        if rank_mod.is_installed() and s.rank_game == game:
+            return
+        ok, _err = rank_mod.install(s.rank_real, s.rank_real_stars, s.rank_show, s.rank_show_stars, s.rank_set)
+        if ok:
+            s.rank_game = game
+            self.schedule_save()
+
+    def _refresh_shop_pack(self):
+        """Пак магазина уже стоит, но данные старше суток или игра обновилась — пересобираем в фоне.
+        Пока Dota открыта, файл занят: не страшно, попробуем при следующей проверке."""
+        if self._shop_busy or not shop_mod.needs_refresh():
+            return
+        self._shop_busy = True
+
+        def work():
+            try:
+                ok, err = shop_mod.build()
+                if not ok:
+                    log.info("Обновление пака магазина отложено: %s", err)
+            except Exception as e:                       # фоновая задача не должна ронять программу
+                log.warning("Обновление пака магазина не удалось: %s", e)
+            finally:
+                self._shop_busy = False
+        threading.Thread(target=work, daemon=True).start()
+
+    @staticmethod
+    def _set_checked(action, checked: bool):
+        action.blockSignals(True)
+        action.setChecked(checked)
+        action.blockSignals(False)
+
+    def _ask(self, title: str, text: str, ok: str) -> bool:
+        dialog = InfoDialog(title, text, self, size=(460, 330), ok=ok, cancel="Отмена")
+        dialog.move(self.geometry().center() - dialog.rect().center())
+        accepted = dialog.exec_() == QDialog.Accepted
+        dialog.deleteLater()
+        return accepted
+
+    def _info(self, title: str, text: str):
+        dialog = InfoDialog(title, text, self)
+        dialog.move(self.geometry().center() - dialog.rect().center())
+        dialog.exec_()
+        dialog.deleteLater()
 
     def set_builds_auto(self, enabled: bool):
         self.settings.builds_auto = enabled

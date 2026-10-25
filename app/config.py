@@ -152,6 +152,18 @@ class Settings:
         self.sound_file = ""         # свой WAV; пустая строка — встроенный звон
         self.sound_volume = 70       # громкость звонка, 0..100
         self.hud_hold_alt = True     # True — HUD виден только пока зажат Alt (поведение по умолчанию)
+        self.only_in_dota = True     # эффект только пока в фокусе Dota 2
+        self.ingame_marker = False       # свой маркер установлен в игру подменой файлов (pak67 в dota_russian)
+        self.ingame_petals = "#ff0055"   # цвет лепестков маркера в игре
+        self.ingame_rest = "#00ccff"     # цвет остального (центр, свечение, кольца)
+        self.ingame_chevron = True       # наша форма лепестков вместо родной стрелки
+        self.rank_mod = False            # свой вид ранга установлен в игру (pak69 в dota_russian)
+        self.rank_real = "5"             # настоящий ранг: медаль и звёзды
+        self.rank_real_stars = 1
+        self.rank_show = "8"             # каким ранг показывать
+        self.rank_show_stars = 1
+        self.rank_game = ""              # версия игры, из которой собран пак рангов
+        self.rank_set = ""               # свой набор иконок рангов ("" — родные)
         self.builds_auto = True      # True — сборки автоматически появляются при открытом магазине
         self.builds_gold_zone = None # (x, y, w, h) зоны кнопки золота; None — автозона 20% справа снизу
         self.launcher_enabled = True # иконка-кнопка в углу экрана
@@ -187,6 +199,18 @@ class Settings:
         s.sound_file = str(raw.get("sound_file") or "")
         s.sound_volume = _clamp(raw.get("sound_volume", 70), 0, 100, 70)
         s.hud_hold_alt = bool(raw.get("hud_hold_alt", True))
+        s.only_in_dota = bool(raw.get("only_in_dota", True))
+        s.ingame_marker = bool(raw.get("ingame_marker", False))
+        s.ingame_petals = str(raw.get("ingame_petals", s.ingame_petals))
+        s.ingame_rest = str(raw.get("ingame_rest", s.ingame_rest))
+        s.ingame_chevron = bool(raw.get("ingame_chevron", True))
+        s.rank_mod = bool(raw.get("rank_mod", False))
+        s.rank_real = str(raw.get("rank_real", s.rank_real))
+        s.rank_real_stars = _clamp(raw.get("rank_real_stars", 1), 1, 5, 1)
+        s.rank_show = str(raw.get("rank_show", s.rank_show))
+        s.rank_show_stars = _clamp(raw.get("rank_show_stars", 1), 1, 5, 1)
+        s.rank_game = str(raw.get("rank_game", ""))
+        s.rank_set = str(raw.get("rank_set", ""))
         s.builds_auto = bool(raw.get("builds_auto", True))
         gold = raw.get("builds_gold_zone")
         if isinstance(gold, (list, tuple)) and len(gold) == 4:
@@ -224,6 +248,18 @@ class Settings:
             "sound_file": self.sound_file,
             "sound_volume": self.sound_volume,
             "hud_hold_alt": self.hud_hold_alt,
+            "only_in_dota": self.only_in_dota,
+            "ingame_marker": self.ingame_marker,
+            "ingame_petals": self.ingame_petals,
+            "ingame_rest": self.ingame_rest,
+            "ingame_chevron": self.ingame_chevron,
+            "rank_mod": self.rank_mod,
+            "rank_real": self.rank_real,
+            "rank_real_stars": self.rank_real_stars,
+            "rank_show": self.rank_show,
+            "rank_show_stars": self.rank_show_stars,
+            "rank_game": self.rank_game,
+            "rank_set": self.rank_set,
             "builds_auto": self.builds_auto,
             "builds_gold_zone": list(self.builds_gold_zone) if self.builds_gold_zone else None,
             "launcher_enabled": self.launcher_enabled,

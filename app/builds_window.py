@@ -2,15 +2,15 @@
 from __future__ import annotations
 
 import ctypes
-import math
-from PyQt5.QtCore import QObject, QPoint, QPointF, QTimer, Qt, pyqtSignal
-from PyQt5.QtGui import QBrush, QColor, QFont, QLinearGradient, QPainter, QPainterPath, QPen, QPixmap
-from PyQt5.QtWidgets import QToolTip, QApplication, QButtonGroup, QComboBox, QCompleter, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
+import os
+from PyQt5.QtCore import QObject, QPoint, QTimer, Qt, pyqtSignal
+from PyQt5.QtGui import QFont, QPainter, QPixmap, QTransform
+from PyQt5.QtWidgets import QApplication, QButtonGroup, QFrame, QGridLayout, QHBoxLayout, QLabel, QScrollArea, QVBoxLayout, QWidget
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple
-from app.builds_data import BUILDS_DAYS, BuildsService, DotaConstants, ITEMS_PER_PHASE, PHASES, POSITIONS, POSITION_NAMES, SKILL_LEN, _is_int, fetch_image_bytes, format_age, is_talent
-from app.config import ACCENT, APP_TITLE, BG, DANGER, DIM, FONT, FONT_SYMBOL, IS_WINDOWS, MUTED, TEXT, log
+from app.builds_data import BUILDS_DAYS, BuildsService, DotaConstants, ITEMS_PER_PHASE, PHASES, POSITIONS, POSITION_NAMES, _is_int, fetch_image_bytes, format_age, is_talent
+from app.config import APP_TITLE, DANGER, DIM, FONT, FONT_SYMBOL, IS_WINDOWS, MUTED, TEXT, log
 from app.sound import is_key_down
 from app.trail import keep_on_top
 from app.ui_common import DragHeader, caption, make_button
@@ -294,116 +294,46 @@ class IconTile(ClickLabel):
                                      Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation))
 
 
+TALENT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "talents")
+# Кез: у второй стойки в тех же слотах другие способности (уровни общие)
+STANCE2 = {"kez_echo_slash": "kez_falcon_rush", "kez_grappling_claw": "kez_talon_toss",
+           "kez_kazurai_katana": "kez_shodo_sai", "kez_raptor_dance": "kez_ravens_veil"}
+
+
 class TalentTree(QWidget):
-    """Древо талантов как в игре: на каждом из 4 уровней горит лист того таланта, который берут чаще."""
+    """Древо талантов как в игре, из картинок Valve: подложка, серое дерево и оранжевые листья выбранных талантов.
+    Лист каждого яруса нарисован справа, левый — зеркальное отражение."""
 
-    W, H, SCALE = 74, 86, 2.1
-    CX, CY, RING_R = 36.6, 43.0, 27.0
-    LEAF_LEN, LEAF_HALF = 11.0, 2.5
-    # Снизу вверх (уровни 10/15/20/25): высота ветки на стволе, угол листа над горизонталью, отступ основания
-    TIERS = ((61.0, 18.0, 7.0), (50.0, 14.0, 7.0), (40.0, 26.0, 7.0), (31.0, 56.0, 3.0))
-    DIM, DIM_EDGE, STEM_DIM = "#79859a", "#4b5362", "#566072"
-    HOT_BASE, HOT_TIP = "#ff7a18", "#ffd27a"
+    SIZE = 120
+    TIERS = (10, 15, 20, 25)
+    _cache: Dict[str, QPixmap] = {}
 
-    def __init__(self, talents: list, consts, parent=None):
+    def __init__(self, talents: list, consts=None, parent=None):
         super().__init__(parent)
-        self.talents, self.consts = talents, consts
-        self.setFixedSize(int(self.W * self.SCALE), int(self.H * self.SCALE))
-        self.setMouseTracking(True)
+        self.talents = talents
+        self.setFixedSize(self.SIZE, self.SIZE)
 
-    def _leaf(self, tier: int, side: int) -> Tuple[QPointF, QPointF]:
-        """Основание и кончик листа; side: -1 — левый, +1 — правый."""
-        y, angle, off = self.TIERS[tier]
-        a = math.radians(angle)
-        base = QPointF(self.CX + side * off, y - 1.0)
-        return base, QPointF(base.x() + side * self.LEAF_LEN * math.cos(a), base.y() - self.LEAF_LEN * math.sin(a))
-
-    def _pick(self, tier: int) -> str:
-        return (self.talents[tier].get("picked") or "") if tier < len(self.talents) else ""
+    @classmethod
+    def _img(cls, name: str) -> QPixmap:
+        if name not in cls._cache:
+            cls._cache[name] = QPixmap(os.path.join(TALENT_DIR, name + ".png"))
+        return cls._cache[name]
 
     def paintEvent(self, _event):
         p = QPainter(self)
-        p.setRenderHint(QPainter.Antialiasing)
-        p.scale(self.SCALE, self.SCALE)
-        lit_tiers = [i for i in range(4) if self._pick(i)]
-        top_lit = max(lit_tiers) if lit_tiers else -1
-
-        # Кольцо и засечки под ним
-        p.setPen(QPen(QColor(110, 120, 138, 110), 0.8))
-        p.setBrush(Qt.NoBrush)
-        p.drawEllipse(QPointF(self.CX, self.CY), self.RING_R, self.RING_R)
-        p.setPen(QPen(QColor("#3d4452"), 1.6, Qt.SolidLine, Qt.FlatCap))
-        for deg in (150, 128, 108, 90, 72, 52, 30):
-            r = math.radians(deg)
-            c = QPointF(self.CX + 31 * math.cos(r), self.CY + 31 * math.sin(r))
-            d = QPointF(math.cos(r), math.sin(r)) * 1.4
-            p.drawLine(c - d, c + d)
-
-        # Ствол и ветки: тусклые целиком, а у горящих — оранжевые
-        stem_top, stem_bottom = self.TIERS[3][0] - 2, 69.0
-        p.setPen(QPen(QColor(self.STEM_DIM), 1.6, Qt.SolidLine, Qt.FlatCap))
-        p.drawLine(QPointF(self.CX, stem_top), QPointF(self.CX, stem_bottom))
-        for tier in range(4):
-            y = self.TIERS[tier][0]
-            for side in (-1, 1):
-                p.drawLine(QPointF(self.CX, y), QPointF(self.CX + side * self.TIERS[tier][2], y - 1.0))
-        hot = QColor(self.HOT_BASE)
-        if top_lit >= 0:
-            glow = QColor(255, 140, 40, 70)
-            p.setPen(QPen(glow, 5.0, Qt.SolidLine, Qt.RoundCap))
-            p.drawLine(QPointF(self.CX, self.TIERS[top_lit][0]), QPointF(self.CX, stem_bottom))
-            p.setPen(QPen(hot, 1.8, Qt.SolidLine, Qt.FlatCap))
-            p.drawLine(QPointF(self.CX, self.TIERS[top_lit][0]), QPointF(self.CX, stem_bottom))
-        for tier in lit_tiers:
-            side = -1 if self._pick(tier) == "left" else 1
-            y, _a, off = self.TIERS[tier]
-            p.setPen(QPen(hot, 1.6, Qt.SolidLine, Qt.FlatCap))
-            p.drawLine(QPointF(self.CX, y), QPointF(self.CX + side * off, y - 1.0))
-
-        # Листья
-        for tier in range(4):
-            for side, name in ((-1, "left"), (1, "right")):
-                self._draw_leaf(p, tier, side, self._pick(tier) == name)
-
-    def _draw_leaf(self, p: QPainter, tier: int, side: int, lit: bool):
-        base, tip = self._leaf(tier, side)
-        mid = QPointF((base.x() + tip.x()) / 2, (base.y() + tip.y()) / 2)
-        ang = math.atan2(tip.y() - base.y(), tip.x() - base.x())
-        n = QPointF(-math.sin(ang), math.cos(ang)) * self.LEAF_HALF
-        path = QPainterPath(base)
-        path.quadTo(mid + n, tip)
-        path.quadTo(mid - n, base)
-        if lit:
-            p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 140, 40, 70))
-            glow = QPainterPath(base)
-            g = n * 1.8
-            glow.quadTo(mid + g, tip)
-            glow.quadTo(mid - g, base)
-            p.drawPath(glow)
-            grad = QLinearGradient(base, tip)
-            grad.setColorAt(0, QColor(self.HOT_BASE))
-            grad.setColorAt(1, QColor(self.HOT_TIP))
-            p.setBrush(QBrush(grad))
-            p.setPen(QPen(QColor("#b34a00"), 0.4))
-        else:
-            p.setBrush(QColor(self.DIM))
-            p.setPen(QPen(QColor(self.DIM_EDGE), 0.5))
-        p.drawPath(path)
-
-    def mouseMoveEvent(self, event):
-        x, y = event.pos().x() / self.SCALE, event.pos().y() / self.SCALE
-        for tier in range(min(4, len(self.talents))):
-            t = self.talents[tier]
-            for side, name in ((-1, "left"), (1, "right")):
-                base, tip = self._leaf(tier, side)
-                if math.hypot(x - (base.x() + tip.x()) / 2, y - (base.y() + tip.y()) / 2) <= 6.5 and t.get(name):
-                    key, pct = t[name], t.get(name + "_pct", 0)
-                    label = self.consts.ability_name(key) if self.consts else key
-                    star = " · выбирают чаще" if self._pick(tier) == name else ""
-                    QToolTip.showText(event.globalPos(), f"{t.get('level')} ур. · {label} · {pct}%{star}", self)
-                    return
-        QToolTip.hideText()
+        p.setRenderHint(QPainter.SmoothPixmapTransform)
+        rect = self.rect()
+        p.drawPixmap(rect, self._img("bg"))
+        p.drawPixmap(rect, self._img("bg_all_off"))
+        for i, t in enumerate(self.talents[:4]):
+            picked = t.get("picked") or ""
+            if not picked:
+                continue
+            level = t.get("level") if t.get("level") in self.TIERS else self.TIERS[i]
+            leaf = self._img(f"pip{level}")
+            if picked == "left":
+                leaf = leaf.transformed(QTransform().scale(-1, 1))
+            p.drawPixmap(rect, leaf)
 
 
 class BuildsWindow(QWidget):
@@ -421,12 +351,12 @@ class BuildsWindow(QWidget):
         self.service, self.images = service, images
         self.role = role if 0 <= role < len(POSITIONS) else 0
         self.hero_id = 0
+        self._stance2 = False
         self.consts: Optional[DotaConstants] = None
         self.data: Optional[dict] = None
         self._pending_hero = hero_id if _is_int(hero_id) and hero_id > 0 else 0
         self._game_hero = 0
         self._token = 0
-        self._filling = False
         self._status = ""
 
         self._runner = AsyncRunner(1, self)
@@ -461,7 +391,7 @@ class BuildsWindow(QWidget):
         self.portrait = IconTile(64, 36, "?")
         names = QVBoxLayout()
         names.setSpacing(0)
-        self.lbl_hero = QLabel("Выбери героя")
+        self.lbl_hero = QLabel("Ждём героя из игры")
         self.lbl_hero.setFont(QFont(FONT, 11, QFont.Bold))
         self.lbl_hero.setStyleSheet(f"color: {TEXT}; background: transparent;")
         self.lbl_role = caption("", size=9, color=MUTED)
@@ -475,27 +405,6 @@ class BuildsWindow(QWidget):
         hl.addLayout(names, 1)
         hl.addWidget(btn_close, 0, Qt.AlignTop)
         body.addWidget(header)
-
-        # Поиск героя
-        view_style = (f"background: {BG}; color: {TEXT}; selection-background-color: {ACCENT};"
-                      " selection-color: #000; border: 1px solid #2a2a3a;")
-        self.combo = QComboBox()
-        self.combo.setEditable(True)
-        self.combo.setInsertPolicy(QComboBox.NoInsert)
-        self.combo.setMaxVisibleItems(15)
-        self.combo.lineEdit().setPlaceholderText("Поиск героя…")
-        self.combo.setStyleSheet(
-            f"QComboBox {{ background: {SHOP_SLOT}; color: {TEXT}; border: 1px solid {SHOP_EDGE}; border-radius: 2px;"
-            " padding: 3px 8px; }"
-            f" QComboBox:focus {{ border: 1px solid {SHOP_GOLD_DIM}; }}"
-            f" QComboBox QAbstractItemView {{ {view_style} }}")
-        completer = self.combo.completer()
-        completer.setCompletionMode(QCompleter.PopupCompletion)
-        completer.setFilterMode(Qt.MatchContains)
-        completer.setCaseSensitivity(Qt.CaseInsensitive)
-        completer.popup().setStyleSheet(view_style)
-        self.combo.currentIndexChanged.connect(self._on_combo)
-        body.addWidget(self.combo)
 
         # Вкладки позиций
         tabs = QHBoxLayout()
@@ -660,7 +569,6 @@ class BuildsWindow(QWidget):
         self.hero_id = hero_id
         if changed:
             self.data = None
-            self._select_combo(hero_id)
             self.lbl_hero.setText(self.consts.hero_name(hero_id))
             self.portrait.setText("?")  # заодно убирает портрет прошлого героя
             self.images.request(self.consts.hero_img(hero_id),
@@ -677,20 +585,6 @@ class BuildsWindow(QWidget):
             self._runner.submit(("consts",), self.service.constants, force)
         elif self.hero_id:
             self.set_hero(self.hero_id, force=force)
-
-    def _select_combo(self, hero_id: int):
-        idx = self.combo.findData(hero_id)
-        if idx >= 0:
-            self._filling = True
-            self.combo.setCurrentIndex(idx)
-            self._filling = False
-
-    def _on_combo(self, index: int):
-        if self._filling or index < 0:
-            return
-        hero_id = self.combo.itemData(index)
-        if _is_int(hero_id):
-            self.set_hero(hero_id)
 
     def _set_status(self, text: str):
         self._status = text
@@ -712,13 +606,12 @@ class BuildsWindow(QWidget):
                 self._set_status(f"Не удалось загрузить справочники: {error}. Нажми ⟳, чтобы повторить.")
                 return
             self.consts = result
-            self._fill_combo()
             hero = self._pending_hero or self._game_hero
             self._pending_hero = 0
             if hero:
                 self.set_hero(hero)
             else:
-                self._set_status("Выбери героя в поиске или начни матч — герой подхватится сам.")
+                self._set_status("Начни пик или матч — герой подхватится сам.")
             return
 
         _, tok, hero_id = token
@@ -730,14 +623,6 @@ class BuildsWindow(QWidget):
         self.data = result
         self._render()
         self._set_status(self._source_text(result))
-
-    def _fill_combo(self):
-        self._filling = True
-        self.combo.clear()
-        for hid, h in sorted(self.consts.heroes.items(), key=lambda kv: kv[1]["localized_name"]):
-            self.combo.addItem(h["localized_name"], hid)
-        self.combo.setCurrentIndex(-1)
-        self._filling = False
 
     @staticmethod
     def _source_text(data: dict) -> str:
@@ -751,6 +636,12 @@ class BuildsWindow(QWidget):
         if data.get("stale"):
             text += f" · свежие данные не скачались ({data.get('error', 'ошибка')}), показан кэш"
         return text
+
+    def set_stance2(self, on: bool):
+        """Кез сменил стойку — перерисовываем прокачку с иконками другой стойки."""
+        if on != self._stance2:
+            self._stance2 = on
+            self._render()
 
     def _render(self):
         pos = None
@@ -779,7 +670,7 @@ class BuildsWindow(QWidget):
         skills = (pos or {}).get("skills") or {}
         order = skills.get("order") or []
         # Таланты в прокачке и так рисуются в блоке «ТАЛАНТЫ» ниже — здесь их пропускаем
-        regular = [(lvl, k) for lvl, k in enumerate(order[:SKILL_LEN], start=1) if not is_talent(k)]
+        regular = [(lvl, k) for lvl, k in enumerate(order[:24], start=1) if k and not is_talent(k)]  # у Мипо и Инвокера список до 24 уровня
         for i, (level, key) in enumerate(regular):
             self.skill_grid.addWidget(self._skill_cell(level, key), i // 9, i % 9)
         if order:
@@ -822,6 +713,8 @@ class BuildsWindow(QWidget):
         num = QLabel(str(level))
         num.setAlignment(Qt.AlignCenter)
         num.setStyleSheet(f"color: {DIM}; font-size: 8px; background: transparent;")
+        if self._stance2:
+            key = STANCE2.get(key, key)
         name = self.consts.ability_name(key) if self.consts else key
         if "attribute" in key:
             tile = IconTile(30, 30, "+", color=TEXT)

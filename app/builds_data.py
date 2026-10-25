@@ -12,6 +12,7 @@ import urllib.request
 from collections import Counter
 from typing import Any, Dict, List, Optional, Tuple
 from app.config import DATA_DIR, _app_dir, log
+from app.skill_order import normalize as normalize_skills
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -648,15 +649,15 @@ class BuildsService:
         name = f"builds4_{int(hero_id)}.json"
         cached = cache_load(name)
         if cached and not force and 0 <= cached[1] < BUILDS_TTL:
-            return dict(cached[0], age=cached[1])
+            return normalize_skills(dict(cached[0], age=cached[1]))
         try:
             data = self._fetch(int(hero_id), consts)
         except BuildsError as e:
             if cached:
-                return dict(cached[0], age=cached[1], stale=True, error=str(e))
+                return normalize_skills(dict(cached[0], age=cached[1], stale=True, error=str(e)))
             raise
         cache_save(name, data)
-        return dict(data, age=0.0)
+        return normalize_skills(dict(data, age=0.0))
 
     def talent_tiers(self, hero_id: int, consts: DotaConstants) -> Dict[int, List[str]]:
         """Пары талантов героя: {1: [имя, имя], ..., 4: [...]} (1..4 ↔ уровни 10/15/20/25)."""
