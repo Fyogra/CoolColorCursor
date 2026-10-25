@@ -106,6 +106,7 @@ JS_TEMPLATE = r'''
 	var TAL = __TAL__;
 	var PHASE_NAMES = [ "НАЧАЛЬНЫЕ ПРЕДМЕТЫ", "РАННЯЯ ИГРА", "ОСНОВНЫЕ ПРЕДМЕТЫ", "ПОЗДНЯЯ ИГРА" ];
 	var panel = null, curName = "", curPos = 0, curHero = 0;
+	var GUIDE_W = 210;        // ширина родной колонки гайда (dota_hud_shop.css, #GuideFlyout)
 	// Кез: у второй стойки в тех же слотах другие способности (уровни общие) — иконки меняем вслед за стойкой
 	var STANCE2 = { kez_echo_slash: "kez_falcon_rush", kez_grappling_claw: "kez_talon_toss",
 		kez_kazurai_katana: "kez_shodo_sai", kez_raptor_dance: "kez_ravens_veil" };
@@ -147,9 +148,10 @@ JS_TEMPLATE = r'''
 		try { it = $.CreatePanel( "DOTAShopItem", parent, "", { itemname: "item_" + key } ); }
 		catch ( e ) { it = null; }
 		if ( !it ) { it = $.CreatePanel( "DOTAItemImage", parent, "", { itemname: "item_" + key } ); }
-		it.style.width = "40px";
-		it.style.height = "30px";
-		it.style.margin = "1px";
+		it.style.width = "42px";
+		it.style.height = "31px";
+		it.style.marginRight = "6px";
+		it.style.marginBottom = "5px";
 		return it;
 	}
 
@@ -163,6 +165,8 @@ JS_TEMPLATE = r'''
 			var n = ctx().FindChildTraverse( names[ i ] );
 			if ( n ) { n.style.visibility = "collapse"; n.visible = false; }
 		}
+		var fly = ctx().FindChildTraverse( "GuideFlyout" );
+		if ( fly ) { fly.style.width = GUIDE_W + "px"; }
 	}
 
 	function ensurePanel()
@@ -173,18 +177,21 @@ JS_TEMPLATE = r'''
 		panel = $.CreatePanel( "Panel", host || ctx(), "CCCBuild", { scrollbars: "y" } );
 		panel.style.flowChildren = "down";
 		panel.style.overflow = "squish scroll";
-		panel.style.backgroundColor = "#2b2e36cc";
+		panel.style.backgroundImage = "url( 's2r://panorama/images/hud/reborn/bg_shop_guide_psd.vtex' )";
+		panel.style.backgroundSize = "cover";
+		panel.style.backgroundPosition = "bottom";
 		if ( inside )
 		{
 			panel.style.width = "100%";
 			panel.style.height = "100%";
-			panel.style.padding = "12px";
+			panel.style.padding = "12px 0px 0px 12px";
 		}
 		else
 		{
-			panel.style.width = "300px";
+			panel.style.width = GUIDE_W + "px";
+			panel.style.backgroundColor = "#000000ee";
 			panel.style.horizontalAlign = "right";
-			panel.style.marginRight = "-310px";
+			panel.style.marginRight = "-" + ( GUIDE_W + 10 ) + "px";
 			panel.style.marginTop = "60px";
 			panel.style.padding = "8px";
 			panel.style.zIndex = "9999";
@@ -207,9 +214,9 @@ JS_TEMPLATE = r'''
 
 	function header( parent, text )
 	{
-		var h = label( parent, text, 14, "#e5e5e5" );
-		h.style.marginTop = "12px";
-		h.style.marginBottom = "4px";
+		var h = label( parent, text, 14, "#ffffff" );
+		h.style.marginTop = "4px";
+		h.style.marginBottom = "2px";
 		h.style.letterSpacing = "2px";
 		return h;
 	}
@@ -227,13 +234,14 @@ JS_TEMPLATE = r'''
 			{
 				var cell = $.CreatePanel( "Panel", srow, "" );
 				cell.style.flowChildren = "down";
-				cell.style.margin = "1px";
+				cell.style.marginRight = "2px";
+				cell.style.marginBottom = "2px";
 				var name = ABIL[ sk[ i ][ 1 ] ];
 				if ( name == "attribute_bonus" )
 				{
 					var box = $.CreatePanel( "Panel", cell, "" );
-					box.style.width = "28px";
-					box.style.height = "28px";
+					box.style.width = "26px";
+					box.style.height = "26px";
 					box.style.backgroundColor = "#6b5a2acc";
 					var plus = label( box, "+", 22, "#ffd27a" );
 					plus.style.horizontalAlign = "center";
@@ -242,8 +250,8 @@ JS_TEMPLATE = r'''
 				else
 				{
 					var img = $.CreatePanel( "DOTAAbilityImage", cell, "", { abilityname: name } );
-					img.style.width = "28px";
-					img.style.height = "28px";
+					img.style.width = "26px";
+					img.style.height = "26px";
 					if ( STANCE2[ name ] ) { stanceImgs.push( [ img, name ] ); }
 				}
 				var lv = label( cell, "" + sk[ i ][ 0 ], 11, "#cccccc" );
@@ -287,13 +295,13 @@ JS_TEMPLATE = r'''
 		root.style.flowChildren = "down";
 		root.style.width = "100%";
 		var b = { root: root, pos: {}, tabs: {}, tabLabels: {} };
-		var title = label( root, "СБОРКА ПО СТАТИСТИКЕ", 15, "#ffffff" );
-		title.style.fontWeight = "bold";
+		var title = label( root, "СБОРКА ПО СТАТИСТИКЕ", 14, "#d3d3d3" );
+		title.style.fontWeight = "semi-bold";
 		if ( !d ) { label( root, "Нет данных для героя", 14, "#cccccc" ); return b; }
 		var tabs = $.CreatePanel( "Panel", root, "" );
 		tabs.style.flowChildren = "right";
-		tabs.style.margin = "6px 0px";
-		tabs.style.width = "100%";
+		tabs.style.margin = "6px 0px 4px 0px";
+		tabs.style.width = "192px";
 		for ( var i = 0; i < d.o.length; i++ )
 		{
 			( function ( pos )
@@ -303,7 +311,7 @@ JS_TEMPLATE = r'''
 				t.style.marginRight = "4px";
 				t.style.borderRadius = "4px";
 				b.tabs[ pos ] = t;
-				b.tabLabels[ pos ] = label( t, "" + pos, 16, "#ffffff" );
+				b.tabLabels[ pos ] = label( t, "" + pos, 14, "#ffffff" );
 				b.tabLabels[ pos ].style.horizontalAlign = "center";
 				t.SetPanelEvent( "onactivate", function () { curPos = pos; showPos( b, pos ); } );
 			} )( d.o[ i ] );
@@ -319,9 +327,9 @@ JS_TEMPLATE = r'''
 			for ( var ph = 0; ph < 4; ph++ )
 			{
 				if ( !phases[ ph ].length ) { continue; }
-				var pl = label( col, PHASE_NAMES[ ph ], 14, "#e5e5e5" );
-				pl.style.marginTop = "12px";
-				pl.style.marginBottom = "4px";
+				var pl = label( col, PHASE_NAMES[ ph ], 14, "#ffffff" );
+				pl.style.marginTop = "4px";
+				pl.style.marginBottom = "2px";
 				pl.style.letterSpacing = "2px";
 				var row = $.CreatePanel( "Panel", col, "" );
 				row.style.flowChildren = "right-wrap";

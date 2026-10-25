@@ -6,7 +6,7 @@ import random
 import threading
 import time
 from datetime import date
-from PyQt5.QtCore import QTimer, Qt
+from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
 from typing import Optional
@@ -47,7 +47,8 @@ def daily_presets(day: date, count: int = 5) -> list:
 
 
 class ControlPanel(QWidget):
-    WIDTH, HEIGHT = 380, 640
+    WIDTH, HEIGHT = 380, 676
+    shopModeDone = pyqtSignal(str, bool, str)    # режим сборок, получилось ли, причина — из фонового потока
 
     QUICK_COLORS = ("#ff0055", "#ff6600", "#ffcc00", "#00ffc8", "#00ccff", "#0055ff", "#9d00ff", "#ffffff")
     def __init__(self):
@@ -78,6 +79,9 @@ class ControlPanel(QWidget):
         self.gold_watcher = GoldClickWatcher()
         self._builds_auto_shown = False   # окно показали детектор или клик (не пользователь)
         self._shop_poll = 0
+        self._shop_busy = False   # пак магазина пишется в фоне
+        self._shop_pending = ""   # режим сборок, который сейчас ставится в фоне
+        self.builds_mode = "shop" if shop_mod.is_installed() else "overlay"   # где сборки: в магазине Dota или в оверлее
         self.active = 0  # какой цвет редактируем: 0 — основной, 1 — дополнительный
         self.history_buttons = []
         self._quitting = False
@@ -99,7 +103,7 @@ class ControlPanel(QWidget):
             log.info("Паки не перенесены: %s", e)
         self._ensure_ingame_marker()
         self._ensure_rank_mod()
-        self._shop_busy = False
+        self.shopModeDone.connect(self._on_builds_mode_done)
         self._shop_timer = QTimer(self)
         self._shop_timer.timeout.connect(self._refresh_shop_pack)
         self._shop_timer.start(30 * 60 * 1000)
@@ -253,6 +257,20 @@ class ControlPanel(QWidget):
         dota2.addWidget(self.btn_builds)
         dota2.addWidget(self.btn_sound)
         dota2.addWidget(btn_sound_settings)
+
+        # Где показывать сборки: в магазине Dota (наш пак) или в оверлее — включён только один вариант
+        modes = QHBoxLayout()
+        modes.addWidget(caption("СБОРКИ:", size=9, color=DIM))
+        self.btn_mode_shop = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.btn_mode_shop.setToolTip("Сборки прямо в магазине игры вместо родных гайдов (замена файлов, "
+                                      "заработает после перезапуска Dota 2). Оверлейные сборки выключаются")
+        self.btn_mode_shop.clicked.connect(lambda: self.set_builds_mode("shop"))
+        self.btn_mode_overlay = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.btn_mode_overlay.setToolTip("Сборки в отдельном окне поверх игры, родной магазин без изменений")
+        self.btn_mode_overlay.clicked.connect(lambda: self.set_builds_mode("overlay"))
+        modes.addWidget(self.btn_mode_shop, 1)
+        modes.addWidget(self.btn_mode_overlay, 1)
+        root.addLayout(modes)
         root.addLayout(dota2)
 
         mods = QHBoxLayout()
@@ -322,7 +340,8 @@ class ControlPanel(QWidget):
         self.act_toggle.triggered.connect(self.toggle_trail)
 
         menu.addSeparator()
-        menu.addAction("Сборки на героя").triggered.connect(self.open_builds)
+        self.act_builds = menu.addAction("Сборки на героя")
+        self.act_builds.triggered.connect(self.open_builds)
         self.act_timers = menu.addAction("Таймеры Dota 2")
         self.act_timers.setCheckable(True)
         self.act_timers.setChecked(self.hud is not None)
@@ -688,7 +707,7 @@ class ControlPanel(QWidget):
         # Автодетект магазина: только в активном матче (не на паузе, не на базе загрузки)
         if not in_game:
             pass
-        elif self.settings.builds_auto and snap.status in (LIVE, PREGAME):
+        elif self.settings.builds_auto and self.builds_mode == "overlay" and snap.status in (LIVE, PREGAME):
             # Клик по золоту — моментально открываем сборки, не дожидаясь детектора
             if self.gold_watcher.check(self.settings.builds_gold_zone):
                 self._auto_show_builds("right")
@@ -937,13 +956,61 @@ class ControlPanel(QWidget):
         self.schedule_save()
 
     # ── сборки ──────────────────────────────────────────────────────────────
+    def set_builds_mode(self, mode: str):
+        """Сборки в магазине — ставим пак и выключаем оверлейные; в оверлее — убираем пак. Пак пишется в фоне:
+        первая сборка качает данные всех героев. При открытой Dota файл занят — режим не меняется."""
+        if self._shop_busy or mode == self.builds_mode:
+            self._refresh_dota_ui()
+            return
+        if mode == "shop":
+            text = ("Это замена файлов Dota 2. Используете на свой страх и риск: "
+                    "мы не несём никакой ответственности за ваш аккаунт.\n\n"
+                    "Сборки появятся в магазине вместо родных гайдов после перезапуска Dota 2, оверлейные выключатся. "
+                    f"Нужен параметр запуска Steam «{dota_mod.LAUNCH_OPTION}». Файлы игры не меняются, "
+                    "в папку dota_russian кладётся один наш файл, кнопка «Оверлей» его удаляет.")
+            if not self._ask("СБОРКИ В МАГАЗИНЕ DOTA 2", text, "Согласен"):
+                self._refresh_dota_ui()
+                return
+            if self.builds is not None:
+                self.builds.close()
+        self._shop_busy, self._shop_pending = True, mode
+        self._refresh_dota_ui()
+
+        def work():
+            try:
+                if mode == "shop":
+                    self.builds_service.constants()      # пак собирается из справочников в кэше
+                    ok, err = shop_mod.build()
+                else:
+                    ok, err = shop_mod.uninstall()
+            except Exception as e:                       # фоновая задача не должна ронять программу
+                log.warning("Смена режима сборок (%s) не удалась: %s", mode, e)
+                ok, err = False, f"Не получилось: {e}"
+            self.shopModeDone.emit(mode, ok, err)
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_builds_mode_done(self, mode: str, ok: bool, err: str):
+        self._shop_busy, self._shop_pending = False, ""
+        if ok:
+            self.builds_mode = mode
+            self.shop_detector.reset()
+        self._refresh_dota_ui()
+        if not ok:
+            self._info("СБОРКИ", err or "Не получилось.")
+        elif mode == "shop" and dota_mod.launch_option_set() is False:
+            self._info("СБОРКИ", f"В параметрах запуска Dota 2 в Steam нет «{dota_mod.LAUNCH_OPTION}», без него сборки в магазине не появятся.")
+
     def toggle_builds(self):
+        if self.builds_mode == "shop":
+            return
         if self.builds is not None:
             self.builds.close()
         else:
             self.open_builds()
 
     def open_builds(self, dock_side: Optional[str] = None):
+        if self.builds_mode == "shop":              # сборки в магазине — оверлейные выключены
+            return
         new_window = self.builds is None
         if new_window:
             s = self.settings
@@ -1036,10 +1103,22 @@ class ControlPanel(QWidget):
         if self.btn_timers:
             self.btn_timers.setText("ТАЙМЕРЫ: ВКЛ" if timers else "ТАЙМЕРЫ: ВЫКЛ")
             self.btn_timers.setStyleSheet(outline_button_style(ACCENT if timers else DIM, radius=15))
+        overlay = self.builds_mode == "overlay"
         if self.btn_builds:
             opened = self.builds is not None
-            self.btn_builds.setText("📖 СКРЫТЬ СБОРКИ" if opened else "📖 СБОРКИ НА ГЕРОЯ")
-            self.btn_builds.setStyleSheet(outline_button_style(ACCENT, radius=15))
+            self.btn_builds.setText(("📖 СКРЫТЬ СБОРКИ" if opened else "📖 СБОРКИ НА ГЕРОЯ") if overlay else "📖 СБОРКИ В МАГАЗИНЕ")
+            self.btn_builds.setEnabled(overlay)
+            self.btn_builds.setStyleSheet(outline_button_style(ACCENT if overlay else DIM, radius=15))
+        if getattr(self, "btn_mode_shop", None):
+            busy = self._shop_pending
+            for btn, mode, text in ((self.btn_mode_shop, "shop", "🛒 В МАГАЗИНЕ DOTA"), (self.btn_mode_overlay, "overlay", "🪟 ОВЕРЛЕЙ")):
+                on = self.builds_mode == mode
+                btn.setText(("⏳ СОБИРАЮ…" if mode == "shop" else "⏳ УБИРАЮ…") if busy == mode else ("✓ " + text[2:] if on else text))
+                btn.setEnabled(not self._shop_busy)
+                btn.setStyleSheet(outline_button_style(ACCENT if on else DIM, radius=13))
+        for name in ("act_builds", "act_auto"):
+            if getattr(self, name, None):
+                getattr(self, name).setEnabled(overlay)
         if self.btn_sound:
             on = self.settings.sound_enabled
             self.btn_sound.setText("🔔 ЗВУК ЛОТУСА: ВКЛ" if on else "🔕 ЗВУК ЛОТУСА: ВЫКЛ")
