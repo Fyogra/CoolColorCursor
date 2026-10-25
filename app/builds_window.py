@@ -675,7 +675,7 @@ class BuildsWindow(QWidget):
             self.skill_grid.addWidget(self._skill_cell(level, key), i // 9, i % 9)
         if order:
             note = f"Самый частый порядок — {skills.get('pct')}% из {skills.get('games')} игр" if skills.get("pct") \
-                else f"По {skills.get('games')} играм" + (", порядок собран по уровням прокачки" if skills.get("approx") else "")
+                else f"По {skills.get('games')} играм"
             self.lbl_skills.setText(note + ". Таланты показаны отдельно ниже.")
         else:
             self.lbl_skills.setText("Нет данных о прокачке." if self.data else "")

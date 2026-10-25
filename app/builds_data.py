@@ -369,7 +369,7 @@ def skill_points(seq: List[str]) -> List[str]:
 
 def real_skills(games: List[dict], consts: DotaConstants) -> Dict[int, dict]:
     """Порядок прокачки из настоящих цепочек матчей OpenDota: {позиция: skills}. Мало игр на позиции —
-    берётся порядок героя по всем позициям; совсем мало — позиции нет (останется прикидка Stratz)."""
+    берётся порядок героя по всем позициям; совсем мало — позиции нет."""
     seqs = {pos: [skill_points(ability_sequence(g.get("upgrades"), consts)) for g in games if g["pos"] == pos]
             for pos in range(1, 6)}
     every = [s for pos_seqs in seqs.values() for s in pos_seqs]
@@ -488,8 +488,6 @@ def stratz_hero_query(hero_id: int, brackets: str, positions) -> str:
         args = f"heroId: {int(hero_id)}, bracketBasicIds: [{brackets}], positionIds: [POSITION_{int(pos)}]"
         parts.append(f"p{pos}full: itemFullPurchase({args}, matchLimit: 1) {{ itemId time instance matchCount }} "
                      f"p{pos}start: itemStartingPurchase({args}) {{ itemId instance wasGiven matchCount }} "
-                     f"p{pos}min: abilityMinLevel({args}) {{ abilityId level matchCount }} "
-                     f"p{pos}max: abilityMaxLevel({args}) {{ abilityId level matchCount }} "
                      f"p{pos}tal: talent({args}) {{ abilityId matchCount }}")
     return "{ heroStats { " + " ".join(parts) + " } }"
 
@@ -534,15 +532,6 @@ def _stratz_count(row: dict) -> int:
     return n if _is_int(n) and n > 0 else 0
 
 
-def _levels_by_ability(rows: List[dict]) -> Dict[int, Counter]:
-    out: Dict[int, Counter] = {}
-    for r in rows:
-        aid, level = r.get("abilityId"), r.get("level")
-        if _is_int(aid) and _is_int(level) and level > 0:
-            out.setdefault(aid, Counter())[level] += _stratz_count(r)
-    return out
-
-
 def stratz_items(full: List[dict], start: List[dict], games: int, consts: DotaConstants) -> Dict[str, List[dict]]:
     counts = {phase: Counter() for phase, _ in PHASES}
     for r in start:
@@ -577,63 +566,12 @@ def stratz_talents(tiers: Dict[int, List[str]], rows: List[dict], consts: DotaCo
     return pairs
 
 
-def stratz_skills(mins: List[dict], maxs: List[dict], talents: List[dict], consts: DotaConstants) -> dict:
-    """Порядок прокачки на 18 уровней. Stratz отдаёт не цепочки, а «на каком уровне способность
-    взяли впервые» и «на каком довели до максимума» — по ним собираем самый вероятный порядок."""
-    by_min, by_max = _levels_by_ability(mins), _levels_by_ability(maxs)
-    totals = {aid: sum(c.values()) for aid, c in by_min.items()}
-    top = max(totals.values(), default=0)
-    spells = []
-    for aid, total in totals.items():
-        key = consts.ability_ids.get(aid)
-        if key and not is_talent(key) and "attribute" not in key and total * 2 >= top:
-            spells.append((aid, key, by_min[aid].most_common(1)[0][0]))
-    if not spells:
-        return {"order": [], "pct": 0, "games": 0}
-
-    slots: List[Optional[str]] = [None] * SKILL_LEN
-    ult = max(spells, key=lambda s: s[2])  # ультимейт открывается позже всех
-    for step in range(3):
-        if ult[2] + 6 * step <= SKILL_LEN:
-            slots[ult[2] + 6 * step - 1] = ult[1]
-    for t in talents:  # выбранные таланты занимают свой уровень
-        aid = consts.ability_by_name.get(t.get("left" if t.get("picked") == "left" else "right", ""))
-        if aid in by_min and by_min[aid].most_common(1)[0][0] <= SKILL_LEN:
-            slots[by_min[aid].most_common(1)[0][0] - 1] = t["left" if t["picked"] == "left" else "right"]
-    need: Dict[int, int] = {}
-    for aid, key, learn in spells:
-        if (aid, key, learn) == ult:
-            continue
-        need[aid] = 3  # первое очко ставим сразу, ещё три — на прокачку до максимума
-        if learn <= SKILL_LEN and slots[learn - 1] is None:
-            slots[learn - 1] = key
-        else:
-            need[aid] += 1
-    deadline = {aid: (by_max[aid].most_common(1)[0][0] if aid in by_max else SKILL_LEN) for aid in need}
-    learned = {aid: learn for aid, _, learn in spells}
-    names = {aid: key for aid, key, _ in spells}
-    for i in range(SKILL_LEN):
-        if slots[i] is not None:
-            continue
-        level = i + 1
-        ready = [aid for aid in need if need[aid] > 0 and level > learned[aid]]
-        if not ready:
-            slots[i] = "attribute_bonus"
-            continue
-        # Берём способность, которой больше всего очков не хватает на оставшиеся до «максимума» уровни
-        best = max(ready, key=lambda a: (need[a] / max(deadline[a] - level + 1, 1), -deadline[a]))
-        slots[i] = names[best]
-        need[best] -= 1
-    return {"order": slots, "pct": 0, "games": top, "approx": True}
-
-
 def stratz_position(stats: dict, pos: int, consts: DotaConstants, tiers: Dict[int, List[str]]) -> dict:
     full, start = _stratz_rows(stats, pos, "full"), _stratz_rows(stats, pos, "start")
     games = max((_stratz_count(r) for r in start if not r.get("wasGiven") and not r.get("instance")), default=0)
     talents = stratz_talents(tiers, _stratz_rows(stats, pos, "tal"), consts)
     return {"games": games, "item_games": games, "phases": stratz_items(full, start, games, consts),
-            "skills": stratz_skills(_stratz_rows(stats, pos, "min"), _stratz_rows(stats, pos, "max"),
-                                    talents, consts),
+            "skills": {"order": [], "pct": 0, "games": 0},   # прокачка — только из OpenDota (real_skills)
             "talents": talents, "generic_items": False}
 
 
@@ -731,7 +669,7 @@ class BuildsService:
                     built[p], wide = b, True
         if not any(b["item_games"] for b in built.values()):
             raise BuildsError("Stratz: по герою нет данных")
-        # Stratz не отдаёт цепочки прокачки, только прикидку; настоящие цепочки берём из матчей OpenDota
+        # Прокачка только из настоящих цепочек матчей OpenDota (Stratz цепочек не отдаёт)
         for pos, skills in self.real_skills(hero_id, consts).items():
             built[pos]["skills"] = skills
         return {"hero_id": hero_id, "source": "stratz", "wide": wide,
@@ -761,7 +699,7 @@ class BuildsService:
         return data
 
     def real_skills(self, hero_id: int, consts: DotaConstants) -> Dict[int, dict]:
-        """Настоящие цепочки прокачки OpenDota по позициям; не загрузились — {} (останется прикидка Stratz)."""
+        """Настоящие цепочки прокачки OpenDota по позициям; не загрузились — {} (прокачки не будет)."""
         for attempt in range(2):
             try:
                 games = self._explorer_games(hero_id)

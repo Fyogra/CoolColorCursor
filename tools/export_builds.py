@@ -18,6 +18,19 @@ RETRIES = 3
 MAX_FAILED = 0.2      # доля героев без данных, после которой прогон считается проваленным
 
 
+def keep_old_skills(data: dict, path: str) -> None:
+    """OpenDota не ответила по позиции — оставляем прокачку из прошлой выгрузки (только из OpenDota)."""
+    try:
+        with open(path, encoding="utf-8") as f:
+            old = json.load(f).get("positions") or {}
+    except (OSError, ValueError):
+        return
+    for pos, cur in data["positions"].items():
+        prev = (old.get(pos) or {}).get("skills") or {}
+        if not cur["skills"].get("order") and prev.get("source") == "opendota":
+            cur["skills"] = prev
+
+
 def main() -> int:
     for stream in (sys.stdout, sys.stderr):
         stream.reconfigure(encoding="utf-8", errors="replace")  # консоль CI может быть не UTF-8
@@ -51,6 +64,7 @@ def main() -> int:
             continue
         data["generated"] = int(time.time())
         path = os.path.join(folder, f"{hero_id}.json")
+        keep_old_skills(data, path)
         with open(path + ".tmp", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, separators=(",", ":"))
         os.replace(path + ".tmp", path)
