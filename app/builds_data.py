@@ -488,6 +488,7 @@ def stratz_hero_query(hero_id: int, brackets: str, positions) -> str:
         args = f"heroId: {int(hero_id)}, bracketBasicIds: [{brackets}], positionIds: [POSITION_{int(pos)}]"
         parts.append(f"p{pos}full: itemFullPurchase({args}, matchLimit: 1) {{ itemId time instance matchCount }} "
                      f"p{pos}start: itemStartingPurchase({args}) {{ itemId instance wasGiven matchCount }} "
+                     f"p{pos}boot: itemBootPurchase({args}) {{ itemId timeAverage matchCount }} "
                      f"p{pos}tal: talent({args}) {{ abilityId matchCount }}")
     return "{ heroStats { " + " ".join(parts) + " } }"
 
@@ -532,7 +533,8 @@ def _stratz_count(row: dict) -> int:
     return n if _is_int(n) and n > 0 else 0
 
 
-def stratz_items(full: List[dict], start: List[dict], games: int, consts: DotaConstants) -> Dict[str, List[dict]]:
+def stratz_items(full: List[dict], start: List[dict], boots: List[dict], games: int,
+                 consts: DotaConstants) -> Dict[str, List[dict]]:
     counts = {phase: Counter() for phase, _ in PHASES}
     for r in start:
         key = consts.items_by_id.get(r.get("itemId"))
@@ -544,6 +546,15 @@ def stratz_items(full: List[dict], start: List[dict], games: int, consts: DotaCo
             continue
         phase = phase_of(minute * 60)
         counts["early" if phase == "start" else phase][key] += _stratz_count(r)
+    # Сапоги Stratz в общих покупках не отдаёт — отдельный список со средним временем покупки (секунды).
+    # Он посчитан по другой выборке игр, поэтому доля — среди всех купленных сапог, приведённая к числу игр
+    boot_total = sum(_stratz_count(r) for r in boots)
+    for r in boots:
+        key, sec = consts.items_by_id.get(r.get("itemId")), r.get("timeAverage")
+        if not key or key == "boots" or not isinstance(sec, (int, float)) or skip_after_start(key, consts):
+            continue                                 # простые сапоги — только компонент улучшенных
+        phase = phase_of(sec)
+        counts["early" if phase == "start" else phase][key] += _stratz_count(r) * games / boot_total
     return {phase: _top(c, games) for phase, c in counts.items()}
 
 
@@ -570,7 +581,7 @@ def stratz_position(stats: dict, pos: int, consts: DotaConstants, tiers: Dict[in
     full, start = _stratz_rows(stats, pos, "full"), _stratz_rows(stats, pos, "start")
     games = max((_stratz_count(r) for r in start if not r.get("wasGiven") and not r.get("instance")), default=0)
     talents = stratz_talents(tiers, _stratz_rows(stats, pos, "tal"), consts)
-    return {"games": games, "item_games": games, "phases": stratz_items(full, start, games, consts),
+    return {"games": games, "item_games": games, "phases": stratz_items(full, start, _stratz_rows(stats, pos, "boot"), games, consts),
             "skills": {"order": [], "pct": 0, "games": 0},   # прокачка — только из OpenDota (real_skills)
             "talents": talents, "generic_items": False}
 
