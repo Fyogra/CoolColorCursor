@@ -1106,9 +1106,9 @@ class ControlPanel(QWidget):
         overlay = self.builds_mode == "overlay"
         if self.btn_builds:
             opened = self.builds is not None
-            self.btn_builds.setText(("📖 СКРЫТЬ СБОРКИ" if opened else "📖 СБОРКИ НА ГЕРОЯ") if overlay else "📖 СБОРКИ В МАГАЗИНЕ")
-            self.btn_builds.setEnabled(overlay)
-            self.btn_builds.setStyleSheet(outline_button_style(ACCENT if overlay else DIM, radius=15))
+            self.btn_builds.setText("📖 СКРЫТЬ СБОРКИ" if opened else "📖 СБОРКИ НА ГЕРОЯ")
+            self.btn_builds.setVisible(overlay)         # сборки в магазине — кнопка оверлейного окна не нужна
+            self.btn_builds.setStyleSheet(outline_button_style(ACCENT, radius=15))
         if getattr(self, "btn_mode_shop", None):
             busy = self._shop_pending
             for btn, mode, text in ((self.btn_mode_shop, "shop", "🛒 В МАГАЗИНЕ DOTA"), (self.btn_mode_overlay, "overlay", "🪟 ОВЕРЛЕЙ")):
