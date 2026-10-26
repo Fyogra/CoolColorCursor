@@ -123,6 +123,7 @@ JS_TEMPLATE = r'''
 			var img = iconImgs[ i ][ 0 ], name = iconImgs[ i ][ 1 ];
 			var ab = Entities.GetAbilityByName( hero, name );
 			if ( !img.IsValid() || ab < 0 ) { continue; }
+			img.contextEntityIndex = ab;    // так подхватываются перекраски от шмоток (проверено на ПЛе)
 			// у арканы и шмоток своя текстура (spellicons/tidehunter/arcana/...): рисуем её поверх родной иконки
 			var tex = Abilities.GetAbilityTextureName( ab ) || "";
 			$.Msg( "CCC icon: " + name + " -> " + tex );
