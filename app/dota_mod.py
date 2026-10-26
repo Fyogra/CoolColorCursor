@@ -78,7 +78,8 @@ FIRST_PAK = 68
 RESERVED = {67}                                  # pak67 занимает Minify
 DEFAULT_PAKS = {"marker": 68, "shop": 69, "rank": 70}
 # старые версии писали паки без метки под номерами 67/68/69: узнаём их по номеру и содержимому
-_LEGACY = {"marker": (67, ("particles/ui_mouseactions/", "materials/")),
+# (признак узкий: на pak67 лежит Minify, его пак из частиц нельзя принять за свой и «перенести»)
+_LEGACY = {"marker": (67, ("particles/ui_mouseactions/", "materials/particle/arrow_down.vtex_c")),
            "shop": (68, ("panorama/scripts/hud/dota_hud_shop",)),
            "rank": (69, ("panorama/images/rank_tier_icons/",))}
 
@@ -290,7 +291,11 @@ def _write_vpk(path: str, contents: Dict[str, bytes]) -> None:
     tmp = path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(struct.pack("<III", VPK_SIGNATURE, 1, len(tree)) + tree + blob)
-    os.replace(tmp, path)
+    try:
+        os.replace(tmp, path)
+    except OSError:                                  # Dota держит пак открытым — не оставляем мусор в папке игры
+        os.remove(tmp)
+        raise
 
 
 def launch_option_set() -> Optional[bool]:

@@ -21,6 +21,7 @@ STATE_FILE = os.path.join(DATA_DIR, "shop_state.json")
 REFRESH_SECONDS = 20 * 3600
 PHASES = ("start", "early", "mid", "late")
 LIMITS = {"start": 8, "early": 6, "mid": 7, "late": 7}
+MAX_MISSING = 0.1     # доля героев без скачанных сборок, при которой пак не пересобираем
 
 
 def fetch(hero_id):
@@ -37,6 +38,9 @@ def collect():
     items = consts["items"]
     with ThreadPoolExecutor(16) as ex:
         results = dict(ex.map(fetch, list(heroes)))
+    missing = [h for h in heroes if not results.get(h)]
+    if len(missing) > MAX_MISSING * len(heroes):     # сеть подвела — лучше оставить прежний пак, чем урезанный
+        raise OSError(f"не загрузились сборки {len(missing)} героев из {len(heroes)} (нет сети?)")
     table, index, data, names = [], {}, {}, {}
     abil, abil_idx, tal, tal_idx = [], {}, [], {}
 
