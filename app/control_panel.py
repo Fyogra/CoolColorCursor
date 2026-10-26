@@ -65,7 +65,6 @@ class ControlPanel(QWidget):
         self.act_autostart = None
         self.builds = None       # окно сборок
         self.launcher = None     # иконка в углу экрана
-        self.btn_builds = None
         self.btn_sound = None
         self.lbl_gsi = None
         self.act_sound = None
@@ -244,9 +243,6 @@ class ControlPanel(QWidget):
         root.addLayout(dota)
 
         dota2 = QHBoxLayout()
-        self.btn_builds = make_button(height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
-        self.btn_builds.setToolTip("Что собирать на героя: предметы по стадиям игры и порядок прокачки")
-        self.btn_builds.clicked.connect(self.toggle_builds)
         self.btn_sound = make_button(height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
         self.btn_sound.setToolTip("Колокольчик за 5 секунд до появления лотуса")
         self.btn_sound.clicked.connect(self.toggle_sound)
@@ -254,7 +250,6 @@ class ControlPanel(QWidget):
                                          style=outline_button_style(ACCENT, radius=15))
         btn_sound_settings.setToolTip("Выбрать свой WAV и настроить громкость")
         btn_sound_settings.clicked.connect(self.open_sound_dialog)
-        dota2.addWidget(self.btn_builds)
         dota2.addWidget(self.btn_sound)
         dota2.addWidget(btn_sound_settings)
 
@@ -1000,14 +995,6 @@ class ControlPanel(QWidget):
         elif mode == "shop" and dota_mod.launch_option_set() is False:
             self._info("СБОРКИ", f"В параметрах запуска Dota 2 в Steam нет «{dota_mod.LAUNCH_OPTION}», без него сборки в магазине не появятся.")
 
-    def toggle_builds(self):
-        if self.builds_mode == "shop":
-            return
-        if self.builds is not None:
-            self.builds.close()
-        else:
-            self.open_builds()
-
     def open_builds(self, dock_side: Optional[str] = None):
         if self.builds_mode == "shop":              # сборки в магазине — оверлейные выключены
             return
@@ -1104,11 +1091,6 @@ class ControlPanel(QWidget):
             self.btn_timers.setText("ТАЙМЕРЫ: ВКЛ" if timers else "ТАЙМЕРЫ: ВЫКЛ")
             self.btn_timers.setStyleSheet(outline_button_style(ACCENT if timers else DIM, radius=15))
         overlay = self.builds_mode == "overlay"
-        if self.btn_builds:
-            opened = self.builds is not None
-            self.btn_builds.setText("📖 СКРЫТЬ СБОРКИ" if opened else "📖 СБОРКИ НА ГЕРОЯ")
-            self.btn_builds.setVisible(overlay)         # сборки в магазине — кнопка оверлейного окна не нужна
-            self.btn_builds.setStyleSheet(outline_button_style(ACCENT, radius=15))
         if getattr(self, "btn_mode_shop", None):
             busy = self._shop_pending
             for btn, mode, text in ((self.btn_mode_shop, "shop", "🛒 В МАГАЗИНЕ DOTA"), (self.btn_mode_overlay, "overlay", "🪟 ОВЕРЛЕЙ")):
