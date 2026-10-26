@@ -120,11 +120,22 @@ JS_TEMPLATE = r'''
 		if ( hero < 0 ) { return; }
 		for ( var i = 0; i < iconImgs.length; i++ )
 		{
-			var img = iconImgs[ i ][ 0 ];
-			var ab = Entities.GetAbilityByName( hero, iconImgs[ i ][ 1 ] );
-			if ( img.IsValid() && ab >= 0 ) { img.contextEntityIndex = ab; }
+			var img = iconImgs[ i ][ 0 ], name = iconImgs[ i ][ 1 ];
+			var ab = Entities.GetAbilityByName( hero, name );
+			if ( !img.IsValid() || ab < 0 ) { continue; }
+			// у арканы и шмоток своя текстура (spellicons/tidehunter/arcana/...): рисуем её поверх родной иконки
+			var tex = Abilities.GetAbilityTextureName( ab ) || "";
+			$.Msg( "CCC icon: " + name + " -> " + tex );
+			if ( !tex || tex == name ) { continue; }
+			var own = $.CreatePanel( "Image", img.GetParent(), "" );
+			own.SetImage( "file://{images}/spellicons/" + tex + ".png" );
+			own.SetScaling( "stretch-to-fit-preserve-aspect" );
+			own.style.width = "26px";
+			own.style.height = "26px";
+			img.GetParent().MoveChildBefore( own, img );
+			img.style.visibility = "collapse";
 		}
-		iconImgs = [];              // не нашлась способность — остаётся стандартная иконка
+		iconImgs = [];              // не нашлась способность или своей текстуры нет — остаётся стандартная иконка
 	}
 
 	function kezStance2()
