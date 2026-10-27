@@ -20,7 +20,10 @@ JS = "panorama/scripts/hud/dota_hud_shop.vjs_c"
 STATE_FILE = os.path.join(DATA_DIR, "shop_state.json")
 REFRESH_SECONDS = 20 * 3600
 PHASES = ("start", "early", "mid", "late")
-LIMITS = {"start": 8, "early": 6, "mid": 7, "late": 7}
+LIMITS = {"start": 15, "early": 15, "mid": 15, "late": 15}
+RARE_PCT = 6          # предметы реже этого % отбрасываем (но не меньше двух в стадии)
+RARE_PCT_THIN = 3     # ...а на непопулярной позиции героя (игр меньше THIN_SHARE от главной) — реже этого
+THIN_SHARE = 0.25
 MAX_MISSING = 0.1     # доля героев без скачанных сборок, при которой пак не пересобираем
 
 
@@ -63,18 +66,20 @@ def collect():
             continue
         b = normalize(b)
         positions = {}
+        top_games = max([pd.get("games", 0) for pd in (b.get("positions") or {}).values()] or [0])
         for pos, pd in (b.get("positions") or {}).items():
+            rare = RARE_PCT_THIN if pd.get("games", 0) < THIN_SHARE * top_games else RARE_PCT
             phases = []
             for ph in PHASES:
                 row = []
                 for it in (pd.get("phases") or {}).get(ph, [])[:LIMITS[ph]]:
                     key = it["key"]
-                    if key not in items or (it.get("pct", 0) < 6 and len(row) >= 2):
+                    if key not in items or (it.get("pct", 0) < rare and len(row) >= 2):
                         continue          # редкие предметы отбрасываем, но позиция без данных не остаётся
                     if key not in index:
                         index[key] = len(table)
                         table.append(key)
-                    row.append(index[key])
+                    row.append([index[key], it.get("pct", 0)])   # [номер предмета, % покупок]
                 phases.append(row)
             skills = []
             order_ = ((pd.get("skills") or {}).get("order") or [])[:24]
@@ -182,9 +187,29 @@ JS_TEMPLATE = r'''
 		if ( !it ) { it = $.CreatePanel( "DOTAItemImage", parent, "", { itemname: "item_" + key } ); }
 		it.style.width = "42px";
 		it.style.height = "31px";
-		it.style.marginRight = "6px";
-		it.style.marginBottom = "5px";
 		return it;
+	}
+
+	function pctColor( pct )          // 100% — фиолетовый, от 60 — зелёный, от 25 — жёлтый, ниже — красный
+	{
+		if ( pct >= 100 ) { return "#c77dff"; }
+		if ( pct >= 60 ) { return "#5fd35f"; }
+		if ( pct >= 25 ) { return "#f2d24b"; }
+		return "#ff5a5a";
+	}
+
+	function itemCell( parent, key, pct )
+	{
+		var cell = $.CreatePanel( "Panel", parent, "" );
+		cell.style.flowChildren = "down";
+		cell.style.marginRight = "6px";
+		cell.style.marginBottom = "3px";
+		itemPanel( cell, key );
+		var p = label( cell, pct + "%", 11, pctColor( pct ) );
+		p.hittest = false;
+		p.style.horizontalAlign = "center";
+		p.style.fontWeight = "bold";
+		return cell;
 	}
 
 	function ctx() { return $.GetContextPanel(); }
@@ -367,7 +392,11 @@ JS_TEMPLATE = r'''
 				var row = $.CreatePanel( "Panel", col, "" );
 				row.style.flowChildren = "right-wrap";
 				row.style.width = "100%";
-				for ( var k = 0; k < phases[ ph ].length; k++ ) { itemPanel( row, ITEMS[ phases[ ph ][ k ] ] ); }
+				for ( var k = 0; k < phases[ ph ].length; k++ )
+				{
+					var e = phases[ ph ][ k ];          // [номер предмета, % покупок]
+					itemCell( row, ITEMS[ e[ 0 ] ], e[ 1 ] );
+				}
 			}
 			skillsAndTalents( col, d, pos );
 		}

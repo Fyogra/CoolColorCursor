@@ -168,6 +168,17 @@ class GoldClickWatcher:
         return zx <= x <= zx + zw and zy <= y <= zy + zh
 
 
+def pct_color(pct: int) -> str:
+    """Цвет доли покупок (как в магазине Dota): 100% — фиолетовый, от 60 — зелёный, от 25 — жёлтый, ниже — красный."""
+    if pct >= 100:
+        return "#c77dff"
+    if pct >= 60:
+        return "#5fd35f"
+    if pct >= 25:
+        return "#f2d24b"
+    return "#ff5a5a"
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 #  Фоновые задачи для Qt
 # ──────────────────────────────────────────────────────────────────────────────
@@ -700,7 +711,7 @@ class BuildsWindow(QWidget):
         tile.clicked.connect(lambda k=key: self._copy_item(k))
         lbl = QLabel(f"{pct}%")
         lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet(f"color: {MUTED}; font-size: 9px; background: transparent;")
+        lbl.setStyleSheet(f"color: {pct_color(pct)}; font-size: 9px; font-weight: bold; background: transparent;")
         v.addWidget(tile, 0, Qt.AlignHCenter)
         v.addWidget(lbl)
         return cell

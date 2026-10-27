@@ -43,7 +43,8 @@ PHASES = (("start", "Стартовый закуп"), ("early", "Ранняя и
 START_UNTIL = 10              # покупки до 0:10 — стартовый закуп
 EARLY_UNTIL = 10 * 60         # до 10:00 — ранняя игра
 MID_UNTIL = 25 * 60           # до 25:00 — середина, дальше — поздняя
-ITEMS_PER_PHASE = 10
+ITEMS_PER_PHASE = 15
+COPY_MIN_PCT = 25     # вторую (третью…) копию стартового предмета показываем, если её берёт хотя бы столько % игроков
 SKILL_PREFIX = 10             # самая частая последовательность первых N прокачек
 SKILL_LEN = 18
 SKILL_MIN_GAMES = 8           # меньше настоящих цепочек на позиции — берём цепочки героя по всем позициям
@@ -388,6 +389,19 @@ def _top(counter: Counter, total: int) -> List[dict]:
     return [{"key": k, "pct": min(100, max(1, round(100 * v / total)))} for k, v in ranked] if total else []
 
 
+def _phase_tops(counts: Dict[str, Counter], total: int) -> Dict[str, List[dict]]:
+    """Топ предметов по стадиям без повторов: предмет остаётся в той стадии, где его берут чаще всего
+    (при равенстве — в ранней), из остальных убирается."""
+    order = [phase for phase, _ in PHASES]
+    best: Dict[str, str] = {}
+    for phase in order:
+        for key, n in counts[phase].items():
+            if key not in best or n > counts[best[key]][key]:
+                best[key] = phase
+    return {phase: _top(Counter({k: v for k, v in counts[phase].items() if best[k] == phase}), total)
+            for phase in order}
+
+
 def games_from_rows(rows: list, hero_id: int) -> List[dict]:
     """Строки explorer → [{"pos", "log", "upgrades"}] по одной на матч, где играл герой."""
     teams: Dict[Any, list] = {}
@@ -413,12 +427,11 @@ def aggregate_builds(games: List[dict], consts: DotaConstants) -> Dict[str, dict
         mine = [g for g in games if g["pos"] == pos]
         parsed = [game_items(g.get("log"), consts) for g in mine]
         parsed = [p for p in parsed if p is not None]
-        phases = {}
-        for phase, _ in PHASES:
-            c = Counter()
+        counts = {phase: Counter() for phase, _ in PHASES}
+        for phase, c in counts.items():
             for p in parsed:
                 c.update(p[phase])
-            phases[phase] = _top(c, len(parsed))
+        phases = _phase_tops(counts, len(parsed))
         seqs = [ability_sequence(g.get("upgrades"), consts) for g in mine]
         out[str(pos)] = {"games": len(mine), "item_games": len(parsed), "phases": phases,
                          "skills": skill_build(seqs), "talents": talent_pairs(seqs), "generic_items": False}
@@ -449,7 +462,7 @@ def builds_from_popularity(raw, consts: DotaConstants) -> Dict[str, List[dict]]:
     start_values = list(counts["start"].values())
     all_values = [v for c in counts.values() for v in c.values()]
     denom = max(start_values) if start_values else max(all_values, default=0)
-    return {phase: _top(c, denom) for phase, c in counts.items()}
+    return _phase_tops(counts, denom)
 
 
 def explorer_sql(hero_id: int, since: int, limit: int) -> str:
@@ -536,9 +549,17 @@ def _stratz_count(row: dict) -> int:
 def stratz_items(full: List[dict], start: List[dict], boots: List[dict], games: int,
                  consts: DotaConstants) -> Dict[str, List[dict]]:
     counts = {phase: Counter() for phase, _ in PHASES}
+    # Стартовые: сколько игроков взяли k-ю копию (0 — первую). Вторые ветки Stratz часто помечает wasGiven —
+    # для копий их тоже считаем, а долю самого предмета — только по первой своей копии, как и раньше
+    copies: Dict[str, Counter] = {}
     for r in start:
-        key = consts.items_by_id.get(r.get("itemId"))
-        if key and not r.get("wasGiven") and not r.get("instance"):
+        key, inst = consts.items_by_id.get(r.get("itemId")), r.get("instance") or 0
+        if not key or not _is_int(inst):
+            continue
+        if inst:
+            copies.setdefault(key, Counter())[inst] += _stratz_count(r)
+        elif not r.get("wasGiven"):
+            copies.setdefault(key, Counter())[0] += _stratz_count(r)
             counts["start"][key] += _stratz_count(r)
     for r in full:
         key, minute = consts.items_by_id.get(r.get("itemId")), r.get("time")
@@ -555,7 +576,16 @@ def stratz_items(full: List[dict], start: List[dict], boots: List[dict], games: 
             continue                                 # простые сапоги — только компонент улучшенных
         phase = phase_of(sec)
         counts["early" if phase == "start" else phase][key] += _stratz_count(r) * games / boot_total
-    return {phase: _top(c, games) for phase, c in counts.items()}
+    out = _phase_tops(counts, games)
+    start = []                                       # вторая, третья копия (ветки) — отдельным предметом рядом
+    for it in out["start"]:
+        start.append(it)
+        c, k = copies.get(it["key"], Counter()), 1
+        while games and c[k] and 100 * c[k] / games >= COPY_MIN_PCT:
+            start.append({"key": it["key"], "pct": min(100, round(100 * c[k] / games)), "copy": k + 1})
+            k += 1
+    out["start"] = start[:ITEMS_PER_PHASE]
+    return out
 
 
 def stratz_talents(tiers: Dict[int, List[str]], rows: List[dict], consts: DotaConstants) -> List[dict]:

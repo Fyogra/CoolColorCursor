@@ -43,6 +43,10 @@ if IS_WINDOWS:
     _user32.SetWindowDisplayAffinity.restype = wintypes.BOOL
     _user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
     _user32.GetAsyncKeyState.restype = ctypes.c_short
+    _user32.FindWindowW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR]
+    _user32.FindWindowW.restype = wintypes.HWND
+    _user32.PostMessageW.argtypes = [wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM]
+    _user32.PostMessageW.restype = wintypes.BOOL
 
 GWL_EXSTYLE = -20
 WS_EX_TRANSPARENT = 0x00000020
@@ -59,9 +63,29 @@ def foreground_exe() -> str:
     """Имя exe окна, которое сейчас в фокусе (нижний регистр), или пустая строка."""
     if not IS_WINDOWS:
         return ""
+    return window_exe(_user32.GetForegroundWindow())
+
+
+def dota_window():
+    """Окно запущенной Dota 2 (даже свёрнутой) или None. Класс окна SDL — плюс сверяем exe, чтобы не принять
+    за игру что-то другое с таким же заголовком."""
+    if not IS_WINDOWS:
+        return None
+    hwnd = _user32.FindWindowW("SDL_app", "Dota 2")
+    return hwnd if hwnd and window_exe(hwnd) in GAME_EXES else None
+
+
+def close_window(hwnd) -> None:
+    """Просим окно закрыться, как по крестику (WM_CLOSE): игра выходит сама, без убийства процесса."""
+    if IS_WINDOWS and hwnd:
+        _user32.PostMessageW(hwnd, 0x0010, 0, 0)
+
+
+def window_exe(hwnd) -> str:
+    """Имя exe, которому принадлежит окно (нижний регистр), или пустая строка."""
     try:
         pid = wintypes.DWORD(0)
-        _user32.GetWindowThreadProcessId(_user32.GetForegroundWindow(), ctypes.byref(pid))
+        _user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
         if not pid.value:
             return ""
         handle = _kernel32.OpenProcess(0x1000, False, pid.value)  # PROCESS_QUERY_LIMITED_INFORMATION

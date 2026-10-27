@@ -21,7 +21,7 @@ from app.gsi import GSIServer, LIVE, OFFLINE, PREGAME, Snapshot, format_clock, i
 from app.hud import LauncherIcon, STATUS_TEXT, TimerHUD
 from app.icon import app_icon
 from app.sound import AlertTracker, SoundDialog, VK_ALT, ensure_bell, is_key_down, play_bell
-from app.trail import GameFocus, MouseTrailOverlay, keep_on_top
+from app.trail import GameFocus, MouseTrailOverlay, close_window, dota_window, keep_on_top
 from app.ui_common import AutostartDialog, ClickSlider, ColorPickerWindow, DragHeader, InfoDialog, SLIDER_STYLE, StarryBackground, caption, gradient_button_style, make_button, outline_button_style, readable_text_color
 
 
@@ -210,7 +210,13 @@ class ControlPanel(QWidget):
         btn_apply = make_button("✦ ПРИМЕНИТЬ ЦВЕТА", height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
                                 style=outline_button_style(ACCENT))
         btn_apply.clicked.connect(self.apply_colors)
-        root.addWidget(btn_apply)
+        # След включается сам по «Открыть Доту»; здесь — выключить/включить вручную
+        self.btn_toggle = make_button(height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
+        self.btn_toggle.clicked.connect(self.toggle_trail)
+        colors = QHBoxLayout()
+        colors.addWidget(btn_apply, 3)
+        colors.addWidget(self.btn_toggle, 2)
+        root.addLayout(colors)
 
         # История
         root.addWidget(caption("ИСТОРИЯ ВАШИХ ЦВЕТОВ", size=9, color=DIM))
@@ -286,14 +292,11 @@ class ControlPanel(QWidget):
 
         root.addStretch()
 
-        self.btn_toggle = make_button(height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
-        self.btn_toggle.clicked.connect(self.toggle_trail)
-        root.addWidget(self.btn_toggle)
-
         self.btn_dota = make_button("🎮 ОТКРЫТЬ ДОТУ", height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
                                     style=outline_button_style(ACCENT))
         self.btn_dota.setToolTip("Запустить Dota 2 через Steam")
-        self.btn_dota.clicked.connect(self.launch_dota)
+        self.btn_dota.clicked.connect(self.on_dota_button)
+        self._dota_open = False                      # кнопка «Открыть/Закрыть Доту» следит за игрой в _tick
         root.addWidget(self.btn_dota)
 
         self._refresh_toggle_ui()
@@ -331,7 +334,7 @@ class ControlPanel(QWidget):
             f" QMenu::item:selected {{ background-color: {ACCENT}; color: #000; }}")
 
         menu.addAction("Открыть настройки").triggered.connect(self.show_from_tray)
-        self.act_toggle = menu.addAction("Включить эффект")
+        self.act_toggle = menu.addAction("Включить след")
         self.act_toggle.triggered.connect(self.toggle_trail)
 
         menu.addSeparator()
@@ -346,7 +349,7 @@ class ControlPanel(QWidget):
         self.act_hold_alt.setChecked(self.settings.hud_hold_alt)
         self.act_hold_alt.toggled.connect(self.set_hud_hold_alt)
         menu.addAction("Вернуть таймеры под часы игры").triggered.connect(self.reset_hud_position)
-        self.act_only_dota = menu.addAction("Эффект только в Dota 2")
+        self.act_only_dota = menu.addAction("След только в Dota 2")
         self.act_only_dota.setCheckable(True)
         self.act_only_dota.setChecked(self.settings.only_in_dota)
         self.act_only_dota.toggled.connect(self.set_only_in_dota)
@@ -597,6 +600,24 @@ class ControlPanel(QWidget):
             self.overlay = None
         self._refresh_toggle_ui()
 
+    def on_dota_button(self):
+        hwnd = dota_window()
+        if not hwnd:
+            if self.overlay is None:                 # с запуском игры след включается сам
+                self.toggle_trail()
+            self.launch_dota()
+        elif self._ask("ЗАКРЫТЬ ДОТУ", "Закрыть Dota 2?\n\nЕсли ты сейчас в матче — выйдешь из игры.", "Закрыть"):
+            close_window(dota_window())              # пока висел вопрос, игру могли закрыть и так
+            log.info("Закрываю Dota 2")
+
+    def _refresh_dota_button(self):
+        running = dota_window() is not None
+        if running != self._dota_open:
+            self._dota_open = running
+            self.btn_dota.setText("✖ ЗАКРЫТЬ ДОТУ" if running else "🎮 ОТКРЫТЬ ДОТУ")
+            self.btn_dota.setToolTip("Закрыть Dota 2" if running else "Запустить Dota 2 через Steam")
+            self.btn_dota.setStyleSheet(outline_button_style(DANGER if running else ACCENT))
+
     def launch_dota(self):
         """Просим Steam запустить Dota 2 (app id 570). Если игра уже запущена, Steam просто её покажет."""
         url = "steam://rungameid/570"
@@ -619,14 +640,11 @@ class ControlPanel(QWidget):
     def _refresh_toggle_ui(self):
         active = self.overlay is not None
         if hasattr(self, "btn_toggle"):
-            if active:
-                self.btn_toggle.setText("⏹ ВЫКЛЮЧИТЬ ЭФФЕКТ")
-                self.btn_toggle.setStyleSheet(outline_button_style(DANGER, hover_text="#ffffff"))
-            else:
-                self.btn_toggle.setText("▶ ВКЛЮЧИТЬ ЭФФЕКТ")
-                self.btn_toggle.setStyleSheet(outline_button_style(ACCENT))
+            self.btn_toggle.setText("✨ СЛЕД: ВКЛ" if active else "✨ СЛЕД: ВЫКЛ")
+            self.btn_toggle.setToolTip("Выключить след курсора" if active else "Включить след курсора")
+            self.btn_toggle.setStyleSheet(outline_button_style(ACCENT if active else DIM))
         if hasattr(self, "act_toggle"):
-            self.act_toggle.setText("Выключить эффект" if active else "Включить эффект")
+            self.act_toggle.setText("Выключить след" if active else "Включить след")
 
     # ── таймеры Dota 2 ──────────────────────────────────────────────────────
     def _restore_timers(self):
@@ -726,6 +744,7 @@ class ControlPanel(QWidget):
             self._fill_presets()
         if self._ticks % 10 == 0:  # раз в ~2 секунды: игра в окне без рамки может перехватить верхний слой
             self._raise_overlays()
+            self._refresh_dota_button()
         self._refresh_gsi_status(snap)
 
     def _apply_game_focus(self) -> bool:
