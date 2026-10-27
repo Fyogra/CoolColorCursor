@@ -8,7 +8,7 @@ import time
 from datetime import date
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import QApplication, QDialog, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
 from typing import Optional
 from app import dota_mod, ingame_marker, rank_mod, shop_mod
 from app.rank_window import RankDialog
@@ -172,17 +172,24 @@ class ControlPanel(QWidget):
         header_layout.addWidget(btn_quit)
         root.addWidget(header)
 
-        # Слайдеры
-        self.lbl_width = caption(f"ТОЛЩИНА: {s.max_width} px")
+        # ── След курсора: заголовок с переключателем, ползунки ──
+        # След включается сам по «Открыть Доту»; здесь — выключить/включить вручную
+        self.btn_toggle = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.btn_toggle.clicked.connect(self.toggle_trail)
+        self.btn_toggle.setMinimumWidth(128)
+        root.addLayout(self._section("СЛЕД КУРСОРА", self.btn_toggle))
+
+        self.lbl_width = caption(f"ТОЛЩИНА: {s.max_width} px", size=9, color=DIM)
         root.addWidget(self.lbl_width)
         root.addWidget(self._make_slider(2, 50, s.max_width, self.change_width))
 
-        self.lbl_fade = caption(f"СКОРОСТЬ ИСЧЕЗНОВЕНИЯ: {s.fade_ms} мс")
+        self.lbl_fade = caption(f"СКОРОСТЬ ИСЧЕЗНОВЕНИЯ: {s.fade_ms} мс", size=9, color=DIM)
         root.addWidget(self.lbl_fade)
         root.addWidget(self._make_slider(100, 1500, s.fade_ms, self.change_fade))
 
-        # Выбор цвета
-        root.addWidget(caption("ВЫБОР И НАСТРОЙКА ЦВЕТА"))
+        # ── Цвета ──
+        root.addSpacing(4)
+        root.addLayout(self._section("ЦВЕТА"))
 
         slots = QHBoxLayout()
         self.btn_c1 = make_button("Основной", height=28, font=QFont(FONT, 9))
@@ -210,15 +217,8 @@ class ControlPanel(QWidget):
         btn_apply = make_button("✦ ПРИМЕНИТЬ ЦВЕТА", height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
                                 style=outline_button_style(ACCENT))
         btn_apply.clicked.connect(self.apply_colors)
-        # След включается сам по «Открыть Доту»; здесь — выключить/включить вручную
-        self.btn_toggle = make_button(height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
-        self.btn_toggle.clicked.connect(self.toggle_trail)
-        colors = QHBoxLayout()
-        colors.addWidget(btn_apply, 3)
-        colors.addWidget(self.btn_toggle, 2)
-        root.addLayout(colors)
+        root.addWidget(btn_apply)
 
-        # История
         root.addWidget(caption("ИСТОРИЯ ВАШИХ ЦВЕТОВ", size=9, color=DIM))
         history = QHBoxLayout()
         for i in range(HISTORY_SIZE):
@@ -228,27 +228,19 @@ class ControlPanel(QWidget):
             self.history_buttons.append(btn)
         root.addLayout(history)
 
-        # Пресеты
-        root.addWidget(caption("ГОТОВЫЕ ПРЕСЕТЫ"))
+        root.addWidget(caption("ГОТОВЫЕ ПРЕСЕТЫ", size=9, color=DIM))
         self.presets_row = QHBoxLayout()
         self._presets_day = None
         self._fill_presets()
         root.addLayout(self.presets_row)
 
-        # Dota 2
-        root.addWidget(caption("DOTA 2"))
-        dota = QHBoxLayout()
+        # ── Dota 2 ──
+        root.addSpacing(4)
+        root.addLayout(self._section("DOTA 2"))
+
+        timers = QHBoxLayout()
         self.btn_timers = make_button(height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
         self.btn_timers.clicked.connect(self.toggle_timers)
-        btn_gsi = make_button("⚙ GSI-КОНФИГ", height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
-                              style=outline_button_style(ACCENT, radius=15))
-        btn_gsi.setToolTip("Установить в папку Dota 2 конфиг, по которому игра передаёт время матча и героя")
-        btn_gsi.clicked.connect(self.install_gsi)
-        dota.addWidget(self.btn_timers)
-        dota.addWidget(btn_gsi)
-        root.addLayout(dota)
-
-        dota2 = QHBoxLayout()
         self.btn_sound = make_button(height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold))
         self.btn_sound.setToolTip("Колокольчик за 5 секунд до появления лотуса")
         self.btn_sound.clicked.connect(self.toggle_sound)
@@ -256,23 +248,10 @@ class ControlPanel(QWidget):
                                          style=outline_button_style(ACCENT, radius=15))
         btn_sound_settings.setToolTip("Выбрать свой WAV и настроить громкость")
         btn_sound_settings.clicked.connect(self.open_sound_dialog)
-        dota2.addWidget(self.btn_sound)
-        dota2.addWidget(btn_sound_settings)
-
-        # Где показывать сборки: в магазине Dota (наш пак) или в оверлее — включён только один вариант
-        modes = QHBoxLayout()
-        modes.addWidget(caption("СБОРКИ:", size=9, color=DIM))
-        self.btn_mode_shop = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
-        self.btn_mode_shop.setToolTip("Сборки прямо в магазине игры вместо родных гайдов (замена файлов, "
-                                      "заработает после перезапуска Dota 2). Оверлейные сборки выключаются")
-        self.btn_mode_shop.clicked.connect(lambda: self.set_builds_mode("shop"))
-        self.btn_mode_overlay = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
-        self.btn_mode_overlay.setToolTip("Сборки в отдельном окне поверх игры, родной магазин без изменений")
-        self.btn_mode_overlay.clicked.connect(lambda: self.set_builds_mode("overlay"))
-        modes.addWidget(self.btn_mode_shop, 1)
-        modes.addWidget(self.btn_mode_overlay, 1)
-        root.addLayout(modes)
-        root.addLayout(dota2)
+        timers.addWidget(self.btn_timers, 1)
+        timers.addWidget(self.btn_sound, 1)
+        timers.addWidget(btn_sound_settings)
+        root.addLayout(timers)
 
         mods = QHBoxLayout()
         btn_marker = make_button("🎯 МАРКЕР КЛИКА", height=30, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
@@ -287,12 +266,35 @@ class ControlPanel(QWidget):
         mods.addWidget(btn_rank, 1)
         root.addLayout(mods)
 
+        # Где показывать сборки: в магазине Dota (наш пак) или в оверлее — включён только один вариант
+        modes = QHBoxLayout()
+        modes.addWidget(caption("СБОРКИ:", size=9, color=DIM))
+        self.btn_mode_shop = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.btn_mode_shop.setToolTip("Сборки прямо в магазине игры вместо родных гайдов (замена файлов, "
+                                      "заработает после перезапуска Dota 2). Оверлейные сборки выключаются")
+        self.btn_mode_shop.clicked.connect(lambda: self.set_builds_mode("shop"))
+        self.btn_mode_overlay = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.btn_mode_overlay.setToolTip("Сборки в отдельном окне поверх игры, родной магазин без изменений")
+        self.btn_mode_overlay.clicked.connect(lambda: self.set_builds_mode("overlay"))
+        modes.addWidget(self.btn_mode_shop, 1)
+        modes.addWidget(self.btn_mode_overlay, 1)
+        root.addLayout(modes)
+
+        gsi = QHBoxLayout()
+        btn_gsi = make_button("⚙ GSI-КОНФИГ", height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold),
+                              style=outline_button_style(ACCENT, radius=13))
+        btn_gsi.setToolTip("Установить в папку Dota 2 конфиг, по которому игра передаёт время матча и героя")
+        btn_gsi.clicked.connect(self.install_gsi)
+        btn_gsi.setMinimumWidth(124)
         self.lbl_gsi = caption("", size=9, color=DIM)
-        root.addWidget(self.lbl_gsi)
+        self.lbl_gsi.setWordWrap(True)
+        gsi.addWidget(btn_gsi)
+        gsi.addWidget(self.lbl_gsi, 1)
+        root.addLayout(gsi)
 
         root.addStretch()
 
-        self.btn_dota = make_button("🎮 ОТКРЫТЬ ДОТУ", height=36, font=QFont(FONT_SYMBOL, 9, QFont.Bold),
+        self.btn_dota = make_button("🎮 ОТКРЫТЬ ДОТУ", height=38, font=QFont(FONT_SYMBOL, 10, QFont.Bold),
                                     style=outline_button_style(ACCENT))
         self.btn_dota.setToolTip("Запустить Dota 2 через Steam")
         self.btn_dota.clicked.connect(self.on_dota_button)
@@ -303,6 +305,20 @@ class ControlPanel(QWidget):
         self._refresh_dota_ui()
         self._refresh_color_buttons()
         self._refresh_history_ui()
+
+    @staticmethod
+    def _section(title: str, right: QWidget = None) -> QHBoxLayout:
+        """Заголовок раздела: бирюзовое название, тонкая линия до края (или до кнопки справа)."""
+        row = QHBoxLayout()
+        row.setSpacing(8)
+        row.addWidget(caption(title, size=11, color=ACCENT))
+        line = QFrame()
+        line.setFixedHeight(1)
+        line.setStyleSheet(f"background: {DIM}; border: none;")
+        row.addWidget(line, 1, Qt.AlignVCenter)
+        if right is not None:
+            row.addWidget(right)
+        return row
 
     @staticmethod
     def _window_button(text, font_size, hover_color, slot) -> QPushButton:
@@ -642,7 +658,7 @@ class ControlPanel(QWidget):
         if hasattr(self, "btn_toggle"):
             self.btn_toggle.setText("✨ СЛЕД: ВКЛ" if active else "✨ СЛЕД: ВЫКЛ")
             self.btn_toggle.setToolTip("Выключить след курсора" if active else "Включить след курсора")
-            self.btn_toggle.setStyleSheet(outline_button_style(ACCENT if active else DIM))
+            self.btn_toggle.setStyleSheet(outline_button_style(ACCENT if active else DIM, radius=13))
         if hasattr(self, "act_toggle"):
             self.act_toggle.setText("Выключить след" if active else "Включить след")
 
@@ -1122,7 +1138,7 @@ class ControlPanel(QWidget):
                 getattr(self, name).setEnabled(overlay)
         if self.btn_sound:
             on = self.settings.sound_enabled
-            self.btn_sound.setText("🔔 ЗВУК ЛОТУСА: ВКЛ" if on else "🔕 ЗВУК ЛОТУСА: ВЫКЛ")
+            self.btn_sound.setText("🔔 ЛОТУС: ВКЛ" if on else "🔕 ЛОТУС: ВЫКЛ")
             self.btn_sound.setStyleSheet(outline_button_style(ACCENT if on else DIM, radius=15))
         self._set_check(self.act_timers, timers)
         self._set_check(self.act_sound, self.settings.sound_enabled)

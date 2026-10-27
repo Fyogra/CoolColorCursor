@@ -101,7 +101,21 @@ def collect():
             data[hid] = {"o": [int(p) for p in order], "p": {p: positions[p][1] for p in order},
                          "s": {p: positions[p][2] for p in order}, "t": {p: positions[p][3] for p in order}}
     log.info("Магазин: героев с данными %d, предметов %d, скиллов %d, талантов %d", len(data), len(table), len(abil), len(tal))
-    return data, table, names, abil, tal
+    buy = {}
+
+    def parts(key):                       # из чего собирается предмет: части и рецепт (если он платный)
+        if key in buy or key not in items:
+            return
+        comps = list(items[key].get("components") or [])
+        recipe = "recipe_" + key
+        if comps and recipe not in comps and (items.get(recipe) or {}).get("cost"):
+            comps.append(recipe)
+        buy[key] = [int(items[key].get("id") or 0), int(items[key].get("cost") or 0), comps]
+        for c in comps:
+            parts(c)
+    for key in table:
+        parts(key)
+    return data, table, buy, names, abil, tal
 
 
 JS_TEMPLATE = r'''
@@ -111,6 +125,7 @@ JS_TEMPLATE = r'''
 {
 	var DATA = __DATA__;
 	var ITEMS = __ITEMS__;
+	var BUY = __BUY__;         // предмет -> [номер, цена, из чего собирается]
 	var HEROES = __HEROES__;
 	var ABIL = __ABIL__;
 	var TAL = __TAL__;
@@ -123,21 +138,26 @@ JS_TEMPLATE = r'''
 	var stanceImgs = [], stance2 = false;
 	// Иконки прокачки берём у способностей своего героя в матче — так видны иконки арканы и шмоток
 	var iconImgs = [];
+	// В настоящем матче герой появляется раньше, чем подгружаются его шмотки и аркана (в лобби — сразу),
+	// поэтому иконки перепроверяем раз в секунду ещё несколько минут, пока не придёт своя текстура
+	var ICON_TRIES = 300, iconTries = 0;
 
 	function bindIcons()
 	{
 		var hero = Players.GetPlayerHeroEntityIndex( Players.GetLocalPlayer() );
 		if ( hero < 0 ) { return; }
+		var left = [];
 		for ( var i = 0; i < iconImgs.length; i++ )
 		{
 			var img = iconImgs[ i ][ 0 ], name = iconImgs[ i ][ 1 ];
+			if ( !img.IsValid() ) { continue; }
 			var ab = Entities.GetAbilityByName( hero, name );
-			if ( !img.IsValid() || ab < 0 ) { continue; }
+			if ( ab < 0 ) { left.push( iconImgs[ i ] ); continue; }
 			img.contextEntityIndex = ab;    // так подхватываются перекраски от шмоток (проверено на ПЛе)
 			// у арканы и шмоток своя текстура (spellicons/tidehunter/arcana/...): рисуем её поверх родной иконки
 			var tex = Abilities.GetAbilityTextureName( ab ) || "";
+			if ( !tex || tex == name ) { left.push( iconImgs[ i ] ); continue; }
 			$.Msg( "CCC icon: " + name + " -> " + tex );
-			if ( !tex || tex == name ) { continue; }
 			var own = $.CreatePanel( "Image", img.GetParent(), "" );
 			own.SetImage( "file://{images}/spellicons/" + tex + ".png" );
 			own.SetScaling( "stretch-to-fit-preserve-aspect" );
@@ -146,7 +166,8 @@ JS_TEMPLATE = r'''
 			img.GetParent().MoveChildBefore( own, img );
 			img.style.visibility = "collapse";
 		}
-		iconImgs = [];              // не нашлась способность или своей текстуры нет — остаётся стандартная иконка
+		// своей текстуры так и не пришло — остаётся стандартная иконка
+		iconImgs = ++iconTries < ICON_TRIES ? left : [];
 	}
 
 	function kezStance2()
@@ -179,15 +200,69 @@ JS_TEMPLATE = r'''
 		return l;
 	}
 
+	var itemWay = "";         // каким способом удалось создать предмет — в консоль один раз
+
 	function itemPanel( parent, key )
 	{
-		var it;
-		try { it = $.CreatePanel( "DOTAShopItem", parent, "", { itemname: "item_" + key } ); }
+		// Как в родной разметке магазина: из XML с атрибутами — так движок сам вешает покупку (ПКМ),
+		// перетаскивание в инвентарь/квикбай и Ctrl+Shift. Созданный из JS через CreatePanel предмет кликов не ловил
+		var it = null, way = "xml";
+		try
+		{
+			var n = parent.GetChildCount();
+			parent.BCreateChildren( '<DOTAShopItem itemname="item_' + key + '" draggable="true" showpurchasestate="true" />' );
+			if ( parent.GetChildCount() > n ) { it = parent.GetChild( parent.GetChildCount() - 1 ); }
+		}
 		catch ( e ) { it = null; }
-		if ( !it ) { it = $.CreatePanel( "DOTAItemImage", parent, "", { itemname: "item_" + key } ); }
+		if ( !it )
+		{
+			way = "js";
+			try { it = $.CreatePanel( "DOTAShopItem", parent, "", { itemname: "item_" + key, draggable: "true" } ); }
+			catch ( e ) { it = null; }
+		}
+		if ( !it ) { way = "image"; it = $.CreatePanel( "DOTAItemImage", parent, "", { itemname: "item_" + key } ); }
+		if ( !itemWay ) { itemWay = way; $.Msg( "CCC item panel: " + way + " " + it.paneltype ); }
 		it.style.width = "42px";
 		it.style.height = "31px";
 		return it;
+	}
+
+	// ПКМ — купить. Созданным нами предметам игра покупку не вешает, отдаём приказ сами. Улучшение целиком
+	// в лавке не продаётся: как родной магазин, покупаем недостающие части и рецепт, сервер соберёт сам
+	function plan( key, own, out, top )
+	{
+		if ( !top && own[ key ] > 0 ) { own[ key ]--; return; }   // эта часть уже есть в инвентаре/рюкзаке/тайнике
+		var b = BUY[ key ];
+		if ( !b ) { return; }
+		if ( !b[ 2 ].length ) { out.push( key ); return; }
+		for ( var i = 0; i < b[ 2 ].length; i++ ) { plan( b[ 2 ][ i ], own, out, false ); }
+	}
+
+	function buy( key )
+	{
+		var me = Players.GetLocalPlayer();
+		var hero = Players.GetPlayerHeroEntityIndex( me );
+		if ( hero < 0 ) { return; }
+		var own = {};
+		for ( var s = 0; s < 15; s++ )                    // 0–5 инвентарь, 6–8 рюкзак, 9–14 тайник
+		{
+			var it = Entities.GetItemInSlot( hero, s );
+			if ( it < 0 ) { continue; }
+			var n = Abilities.GetAbilityName( it ).replace( "item_", "" );
+			own[ n ] = ( own[ n ] || 0 ) + 1;
+		}
+		var out = [], cost = 0;
+		plan( key, own, out, true );
+		for ( var i = 0; i < out.length; i++ ) { cost += BUY[ out[ i ] ][ 1 ]; }
+		try { if ( Players.GetGold( me ) < cost ) { Game.EmitSound( "General.CastFail_NoMana" ); return; } }
+		catch ( e ) {}
+		for ( var j = 0; j < out.length; j++ )
+		{
+			Game.PrepareUnitOrders( { OrderType: dotaunitorder_t.DOTA_UNIT_ORDER_PURCHASE_ITEM, UnitIndex: hero,
+				AbilityIndex: BUY[ out[ j ] ][ 0 ], ShopItemName: "item_" + out[ j ],
+				OrderIssuer: PlayerOrderIssuer_t.DOTA_ORDER_ISSUER_HERO_ONLY,
+				QueueBehavior: OrderQueueBehavior_t.DOTA_ORDER_QUEUE_NEVER } );
+		}
 	}
 
 	function pctColor( pct )          // 100% — фиолетовый, от 60 — зелёный, от 25 — жёлтый, ниже — красный
@@ -198,13 +273,14 @@ JS_TEMPLATE = r'''
 		return "#ff5a5a";
 	}
 
-	function itemCell( parent, key, pct )
+	function itemCell( parent, idx, pct )
 	{
+		var key = ITEMS[ idx ];
 		var cell = $.CreatePanel( "Panel", parent, "" );
 		cell.style.flowChildren = "down";
 		cell.style.marginRight = "6px";
 		cell.style.marginBottom = "3px";
-		itemPanel( cell, key );
+		itemPanel( cell, key ).SetPanelEvent( "oncontextmenu", function () { buy( key ); } );
 		var p = label( cell, pct + "%", 11, pctColor( pct ) );
 		p.hittest = false;
 		p.style.horizontalAlign = "center";
@@ -231,27 +307,32 @@ JS_TEMPLATE = r'''
 		if ( panel && panel.IsValid() ) { return; }
 		var host = ctx().FindChildTraverse( "ItemBuildContainer" );
 		var inside = !!host;
-		panel = $.CreatePanel( "Panel", host || ctx(), "CCCBuild", { scrollbars: "y" } );
+		// Фон на отдельной неподвижной подложке: у прокручиваемой панели он уезжал вверх вместе с содержимым
+		var frame = $.CreatePanel( "Panel", host || ctx(), "CCCBuildFrame" );
+		frame.style.backgroundImage = "url( 's2r://panorama/images/hud/reborn/bg_shop_guide_psd.vtex' )";
+		frame.style.backgroundSize = "cover";
+		frame.style.backgroundPosition = "bottom";
+		panel = $.CreatePanel( "Panel", frame, "CCCBuild", { scrollbars: "y" } );
 		panel.style.flowChildren = "down";
 		panel.style.overflow = "squish scroll";
-		panel.style.backgroundImage = "url( 's2r://panorama/images/hud/reborn/bg_shop_guide_psd.vtex' )";
-		panel.style.backgroundSize = "cover";
-		panel.style.backgroundPosition = "bottom";
+		panel.style.width = "100%";
+		panel.style.height = "100%";
 		if ( inside )
 		{
-			panel.style.width = "100%";
-			panel.style.height = "100%";
+			frame.style.width = "100%";
+			frame.style.height = "100%";
 			panel.style.padding = "12px 0px 0px 12px";
 		}
 		else
 		{
-			panel.style.width = GUIDE_W + "px";
-			panel.style.backgroundColor = "#000000ee";
-			panel.style.horizontalAlign = "right";
-			panel.style.marginRight = "-" + ( GUIDE_W + 10 ) + "px";
-			panel.style.marginTop = "60px";
+			frame.style.width = GUIDE_W + "px";
+			frame.style.backgroundColor = "#000000ee";
+			frame.style.horizontalAlign = "right";
+			frame.style.marginRight = "-" + ( GUIDE_W + 10 ) + "px";
+			frame.style.marginTop = "60px";
+			frame.style.zIndex = "9999";
+			panel.style.height = "fit-children";
 			panel.style.padding = "8px";
-			panel.style.zIndex = "9999";
 		}
 	}
 
@@ -326,6 +407,7 @@ JS_TEMPLATE = r'''
 			tree.style.width = "120px";
 			tree.style.height = "120px";
 			tree.style.horizontalAlign = "center";
+			tree.style.marginBottom = "60px";      // запас снизу: иначе прокрутка не доезжает до конца дерева
 			var layers = [ "statbranch_button_bg", "statbranch_button_bg_all_off" ];
 			var tiers = [ 10, 15, 20, 25 ];
 			for ( var j = 0; j < tl.length && j < 4; j++ )
@@ -395,7 +477,7 @@ JS_TEMPLATE = r'''
 				for ( var k = 0; k < phases[ ph ].length; k++ )
 				{
 					var e = phases[ ph ][ k ];          // [номер предмета, % покупок]
-					itemCell( row, ITEMS[ e[ 0 ] ], e[ 1 ] );
+					itemCell( row, e[ 0 ], e[ 1 ] );
 				}
 			}
 			skillsAndTalents( col, d, pos );
@@ -427,6 +509,7 @@ JS_TEMPLATE = r'''
 				var d = DATA[ curHero ];
 				curPos = d ? d.o[ 0 ] : 0;
 				render();
+				iconTries = 0;
 			}
 			if ( iconImgs.length ) { bindIcons(); }
 			if ( stanceImgs.length && curName == "npc_dota_hero_kez" ) { updateStance(); }
@@ -490,9 +573,10 @@ def build() -> Tuple[bool, str]:
         except (OSError, KeyError, ValueError) as e:
             log.warning("Не удалось обновить список скиллов героев: %s", e)
     try:
-        data, table, names, abil, tal = collect()
+        data, table, buy, names, abil, tal = collect()
         js = (JS_TEMPLATE.replace("__DATA__", json.dumps(data, separators=(",", ":")))
               .replace("__ITEMS__", json.dumps(table, separators=(",", ":")))
+              .replace("__BUY__", json.dumps(buy, separators=(",", ":")))
               .replace("__HEROES__", json.dumps(names, separators=(",", ":")))
               .replace("__ABIL__", json.dumps(abil, separators=(",", ":")))
               .replace("__TAL__", json.dumps(tal, separators=(",", ":"))))
