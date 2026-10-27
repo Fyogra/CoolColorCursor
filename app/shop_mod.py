@@ -11,7 +11,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple
 from app import dota_mod as d
-from app.builds_data import CACHE_DIR, PUBLISHED_URL
+from app.builds_data import CACHE_DIR, PUBLISHED_URL, BuildsService
 from app.config import DATA_DIR, log
 from app import ability_info, skill_order
 from app.skill_order import normalize, _info as so_info
@@ -33,6 +33,7 @@ def fetch(hero_id):
 
 
 def collect():
+    BuildsService().constants()   # справочники OpenDota: без оверлейных сборок кэша ещё нет — скачает
     consts = json.load(open(os.path.join(CACHE_DIR, "constants.json"), encoding="utf-8"))["data"]
     heroes = {int(k): v for k, v in consts["heroes"].items()}
     items = consts["items"]

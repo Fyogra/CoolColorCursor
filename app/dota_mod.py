@@ -6,10 +6,12 @@
 from __future__ import annotations
 
 import binascii
+import json
 import os
 import re
 import struct
 from typing import Dict, Optional, Tuple
+from app.config import APP_NAME, DATA_DIR
 from app.gsi import _steam_roots, find_dota_cfg_dir
 
 LANG_DIR = "dota_russian"
@@ -73,7 +75,11 @@ def game_dir() -> Optional[str]:
 
 # ── номера наших паков ─────────────────────────────────────────────────────────
 # Номер может быть занят чужим модом (мод-менеджеры тоже кладут pakNN в dota_russian) — тогда берём следующий
-# свободный. Свой пак узнаём по метке ccc/<вид>.txt внутри, поэтому номер нигде запоминать не нужно.
+# свободный. Какой пак наш, запоминаем в paks.json: номер, размер и CRC файла — чужой пак под тем же
+# номером не совпадёт. В самих паках ничего лишнего нет: правила сайтов модов (d2pfxwiki) запрещают
+# не скомпилированные файлы, поэтому прежняя метка ccc/<вид>.txt при запуске убирается (relocate).
+# Реестр — всегда в %APPDATA%\CCC, а не рядом с exe: перенесли программу в другую папку — паки всё равно наши
+REGISTRY = os.path.join(os.environ.get("APPDATA") or DATA_DIR, APP_NAME, "paks.json")
 FIRST_PAK = 68
 RESERVED = {67}                                  # pak67 занимает Minify
 DEFAULT_PAKS = {"marker": 68, "shop": 69, "rank": 70}
@@ -84,8 +90,59 @@ _LEGACY = {"marker": (67, ("particles/ui_mouseactions/", "materials/particle/arr
            "rank": (69, ("panorama/images/rank_tier_icons/",))}
 
 
+SHOP_FILE = "panorama/scripts/hud/dota_hud_shop.vjs_c"
+SHOP_SIGN = b'"CCCBuild"'                        # id нашей панели в JS магазина (shop_mod)
+
+
 def _tag(kind: str) -> str:
+    """Метка старых версий (2.0.0–2.0.2) — только чтобы узнать их паки и пересобрать без неё."""
     return f"ccc/{kind}.txt"
+
+
+def _load_registry() -> Dict[str, dict]:
+    try:
+        with open(REGISTRY, encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_registry(reg: Dict[str, dict]) -> None:
+    os.makedirs(os.path.dirname(REGISTRY), exist_ok=True)
+    tmp = REGISTRY + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(reg, f, ensure_ascii=False, indent=1)
+    os.replace(tmp, REGISTRY)
+
+
+def _fingerprint(path: str) -> Tuple[int, int]:
+    with open(path, "rb") as f:
+        data = f.read()
+    return len(data), binascii.crc32(data) & 0xFFFFFFFF
+
+
+def _register(kind: str, path: Optional[str]) -> None:
+    reg = _load_registry()
+    if path:
+        size, crc = _fingerprint(path)
+        reg[kind] = {"file": os.path.basename(path), "size": size, "crc": crc}
+    else:
+        reg.pop(kind, None)
+    _save_registry(reg)
+
+
+def _registered(folder: str) -> Dict[str, str]:
+    """{вид: путь} паков из paks.json, которые лежат на месте и не изменились (размер и CRC те же)."""
+    found = {}
+    for kind, e in _load_registry().items():
+        try:
+            path = os.path.join(folder, e["file"])
+            if kind in DEFAULT_PAKS and os.path.getsize(path) == e["size"] and _fingerprint(path)[1] == e["crc"]:
+                found[kind] = path
+        except (OSError, KeyError, TypeError):
+            continue
+    return found
 
 
 def _names(path: str) -> set:
@@ -119,10 +176,12 @@ def _lang_folder() -> Optional[str]:
     return os.path.join(game, LANG_DIR) if game else None
 
 
-def _scan() -> Dict[str, str]:
-    """{вид: путь} наших паков в dota_russian."""
+def _scan(with_tags: bool = False) -> Dict[str, str]:
+    """{вид: путь} наших паков в dota_russian: по paks.json, а паки старых версий — по метке или номеру."""
     folder = _lang_folder()
-    found: Dict[str, str] = {}
+    found: Dict[str, str] = _registered(folder) if folder else {}
+    if len(found) == len(DEFAULT_PAKS) and not with_tags:
+        return found
     legacy: Dict[str, str] = {}
     try:
         files = sorted(os.listdir(folder)) if folder else []
@@ -137,6 +196,15 @@ def _scan() -> Dict[str, str]:
             names = _names(path)
         except (OSError, ValueError, struct.error):
             continue
+        if path in found.values():
+            continue
+        if names == {SHOP_FILE} and "shop" not in found:   # paks.json потерян — магазин узнаём по нашему JS
+            try:
+                if SHOP_SIGN in _read_file(path, SHOP_FILE):
+                    found["shop"] = path
+                    continue
+            except (OSError, ValueError, KeyError, struct.error):
+                pass
         for kind in DEFAULT_PAKS:
             if _tag(kind) in names:
                 found.setdefault(kind, path)
@@ -177,24 +245,32 @@ def pak_for_write(kind: str) -> Optional[str]:
 
 
 def relocate() -> None:
-    """Наши паки на зарезервированных номерах (старые версии писали маркер в pak67) переносим на свободные."""
-    for kind, path in _scan().items():
-        if _num(path) in RESERVED:
-            new = _free_slot(kind)
-            if new:                                  # пересобираем с меткой: без неё на новом номере пак не узнать
-                tree = _read_tree(path)
-                files = {inner: _read_from(path, tree, inner) for inner in tree[0]}
-                _write_vpk(new, {**files, _tag(kind): b"CoolColorCursor\n"})
-                os.remove(path)
+    """Паки старых версий приводим в порядок: с зарезервированных номеров (маркер в pak67) переносим на свободные,
+    метку ccc/<вид>.txt выкидываем, всё записываем в paks.json."""
+    for kind, path in _scan(with_tags=True).items():
+        tree = _read_tree(path)
+        if _num(path) not in RESERVED and _tag(kind) not in tree[0]:
+            if kind not in _load_registry():
+                _register(kind, path)                # старый пак без метки (по номеру) — просто запоминаем
+            continue
+        new = _free_slot(kind) if _num(path) in RESERVED else path
+        if not new:
+            continue
+        files = {inner: _read_from(path, tree, inner) for inner in tree[0] if inner != _tag(kind)}
+        _write_vpk(new, files)
+        if new != path:
+            os.remove(path)
+        _register(kind, new)
 
 
 def write_pak(kind: str, files: Dict[str, bytes]) -> str:
-    """Записывает наш пак (с меткой) и возвращает путь; OSError/PermissionError — наружу."""
+    """Записывает наш пак, запоминает его в paks.json и возвращает путь; OSError/PermissionError — наружу."""
     path = pak_for_write(kind)
     if not path:
         raise OSError("нет свободного номера пака в dota_russian")
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    _write_vpk(path, {**files, _tag(kind): b"CoolColorCursor\n"})
+    _write_vpk(path, files)
+    _register(kind, path)
     return path
 
 
@@ -203,6 +279,7 @@ def remove_pak(kind: str) -> None:
     path = our_pak(kind)
     if path:
         os.remove(path)
+    _register(kind, None)
 
 
 def is_installed() -> bool:
