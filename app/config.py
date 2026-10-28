@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from PyQt5.QtGui import QColor
@@ -48,20 +49,46 @@ def _app_dir() -> str:
 
 
 def _data_dir() -> str:
-    """Папка для конфига и лога: рядом с программой, а если туда нельзя писать — в %APPDATA%."""
+    """Папка для конфига, лога и своих наборов: %APPDATA%/CCC — одна на все версии, куда бы ни скачали exe.
+    Без APPDATA — рядом с программой, а если и туда нельзя писать — во временную папку."""
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        path = os.path.join(appdata, APP_NAME)
+        try:
+            os.makedirs(path, exist_ok=True)
+            return path
+        except OSError:
+            pass
     base = _app_dir()
-    if os.access(base, os.W_OK):
-        return base
-    fallback = os.path.join(os.environ.get("APPDATA", os.path.expanduser("~")), APP_NAME)
-    try:
-        os.makedirs(fallback, exist_ok=True)
-        return fallback
-    except OSError:
-        return tempfile.gettempdir()
+    return base if os.access(base, os.W_OK) else tempfile.gettempdir()
 
 
 DATA_DIR = _data_dir()
 CONFIG_FILE = os.path.join(DATA_DIR, "config.json")
+
+# До v.2.0.5 данные лежали рядом с exe, и новая версия в другой папке начинала с чистого листа
+LEGACY_DATA = ("config.json", "shop_state.json", "abilities.json", "rank_sets", "backup")
+
+
+def _migrate_legacy() -> None:
+    """Один раз копирует настройки старой версии из папки программы в общую папку данных."""
+    old = _app_dir()
+    if (os.path.normcase(os.path.abspath(old)) == os.path.normcase(os.path.abspath(DATA_DIR))
+            or os.path.exists(CONFIG_FILE) or not os.path.isfile(os.path.join(old, "config.json"))):
+        return
+    for name in LEGACY_DATA:
+        src, dst = os.path.join(old, name), os.path.join(DATA_DIR, name)
+        try:
+            if os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            elif os.path.isfile(src):
+                shutil.copy2(src, dst)
+        except OSError:
+            pass                  # не скопировалось — эта часть начнётся заново, остальное перенесётся
+
+
+_migrate_legacy()
+
 LOG_FILE = os.path.join(DATA_DIR, "mouse_trail.log")
 ICON_FILE = os.path.join(DATA_DIR, "app_icon.ico")
 
