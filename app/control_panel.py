@@ -276,8 +276,13 @@ class ControlPanel(QWidget):
         self.btn_mode_overlay = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
         self.btn_mode_overlay.setToolTip("Сборки в отдельном окне поверх игры, родной магазин без изменений")
         self.btn_mode_overlay.clicked.connect(lambda: self.set_builds_mode("overlay"))
+        self.btn_mode_off = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.btn_mode_off.setToolTip("Сборки не нужны: ни в магазине, ни в оверлее")
+        self.btn_mode_off.setMinimumWidth(66)
+        self.btn_mode_off.clicked.connect(lambda: self.set_builds_mode("off"))
         modes.addWidget(self.btn_mode_shop, 1)
         modes.addWidget(self.btn_mode_overlay, 1)
+        modes.addWidget(self.btn_mode_off)
         root.addLayout(modes)
 
         gsi = QHBoxLayout()
@@ -984,12 +989,21 @@ class ControlPanel(QWidget):
         if not enabled and self._builds_auto_shown:
             self._auto_hide_builds()
         self.schedule_save()
+        self._refresh_dota_ui()
 
     # ── сборки ──────────────────────────────────────────────────────────────
     def set_builds_mode(self, mode: str):
-        """Сборки в магазине — ставим пак и выключаем оверлейные; в оверлее — убираем пак. Пак пишется в фоне:
-        первая сборка качает данные всех героев. При открытой Dota файл занят — режим не меняется."""
-        if self._shop_busy or mode == self.builds_mode:
+        """Сборки в магазине — ставим пак и выключаем оверлейные; в оверлее — убираем пак; «выкл» — убираем пак
+        и не открываем оверлейные сами. Пак пишется в фоне: первая сборка качает данные всех героев.
+        При открытой Dota файл занят — режим не меняется."""
+        if self._shop_busy:
+            self._refresh_dota_ui()
+            return
+        if mode in ("overlay", "off"):            # «выкл» — тот же оверлейный режим, только без автооткрытия
+            self._set_check(self.act_auto, mode == "overlay")
+            self.set_builds_auto(mode == "overlay")
+            mode = "overlay"
+        if mode == self.builds_mode:
             self._refresh_dota_ui()
             return
         if mode == "shop":
@@ -1128,8 +1142,10 @@ class ControlPanel(QWidget):
         overlay = self.builds_mode == "overlay"
         if getattr(self, "btn_mode_shop", None):
             busy = self._shop_pending
-            for btn, mode, text in ((self.btn_mode_shop, "shop", "🛒 В МАГАЗИНЕ DOTA"), (self.btn_mode_overlay, "overlay", "🪟 ОВЕРЛЕЙ")):
-                on = self.builds_mode == mode
+            current = "shop" if self.builds_mode == "shop" else ("overlay" if self.settings.builds_auto else "off")
+            for btn, mode, text in ((self.btn_mode_shop, "shop", "🛒 В МАГАЗИНЕ"), (self.btn_mode_overlay, "overlay", "🪟 ОВЕРЛЕЙ"),
+                                    (self.btn_mode_off, "off", "✖ ВЫКЛ")):
+                on = current == mode
                 btn.setText(("⏳ СОБИРАЮ…" if mode == "shop" else "⏳ УБИРАЮ…") if busy == mode else ("✓ " + text[2:] if on else text))
                 btn.setEnabled(not self._shop_busy)
                 btn.setStyleSheet(outline_button_style(ACCENT if on else DIM, radius=13))
