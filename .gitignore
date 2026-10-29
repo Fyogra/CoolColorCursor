@@ -5,7 +5,6 @@ build/
 dist/
 *.log
 *.txt
-!requirements.txt
 *.bak
 *.exe
 *.msix

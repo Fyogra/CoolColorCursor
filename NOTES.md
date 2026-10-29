@@ -31,7 +31,7 @@
 | `tools/export_builds.py` | выгрузка данных сборок (GitHub Actions) |
 | `tools/gen_ability_info.py` | пересоздаёт `app/assets/abilities.json` из Dota |
 | `CCC.spec` | сборка `CCC.exe` (`pyinstaller CCC.spec`, ресурсы `app/assets` кладутся внутрь) |
-| `.github/workflows/release.yml` | при публикации релиза GitHub Actions сам собирает `CCC.exe` из кода тега и прикладывает его с SHA-256 (версии в `requirements.txt`); локально exe для релиза больше не собираем |
+| `.github/workflows/release.yml` | при публикации релиза GitHub Actions сам собирает `CCC.exe` из кода тега и прикладывает его с SHA-256; локально exe для релиза больше не собираем |
 
 
 ## Как работают моды Dota
