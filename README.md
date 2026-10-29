@@ -30,7 +30,41 @@
 
 **Ранг в Dota**
 * Показывать свою медаль и звёзды как любые другие (вплоть до топ-Титана).
-* Свои наборы иконок рангов: импорт готового пака (`.vpk`) или редактор, где любую медаль и звёзды можно заменить своей картинкой.
+* Свои наборы иконок рангов: импорт готового пака (`.vpk`) или редактор, где любую медаль и звёзды можно заменить своей картинкой. Картинка любого размера сама встаёт на место родной, для звёзд хватит одной звезды.
+
+---
+
+### Скриншоты
+
+Главное окно и меню в трее (ПКМ по значку):
+
+<img src="docs/screenshots/main_window.png" width="300"> <img src="docs/screenshots/tray_menu.png" width="480">
+
+Сборки в магазине Dota — по позициям, с процентом покупок, прокачкой и талантами:
+
+<img src="docs/screenshots/shop_positions.png" width="780">
+
+<img src="docs/screenshots/shop_ingame.png" width="260"> <img src="docs/screenshots/builds_overlay.png" width="260">
+
+Свой вид ранга — пример набора CCC Simple в игре:
+
+<img src="docs/screenshots/rank_ingame_medals.png" width="600">
+
+<img src="docs/screenshots/rank_ingame_profile.png" width="360">
+
+Как добавить свои иконки рангов:
+
+1. «+ пак» — готовый `.vpk`, или «редактор» — свои картинки:<br><img src="docs/screenshots/rank_step1.png" width="380">
+2. Выбрать пак:<br><img src="docs/screenshots/rank_step2_pick_pak.png" width="460">
+3. Набор выбран → «Применить в игру»:<br><img src="docs/screenshots/rank_step3_added.png" width="380">
+4. В редакторе клик по иконке — своя картинка любого размера, она сама встанет на место родной; для звёзд хватит одной звезды:<br><img src="docs/screenshots/rank_step4_editor.png" width="420">
+5. Выбрать картинку:<br><img src="docs/screenshots/rank_step5_pick_image.png" width="460">
+
+Наборы переключаются в списке:<br><img src="docs/screenshots/rank_sets_switch.png" width="380">
+
+Маркер клика и звук лотуса:
+
+<img src="docs/screenshots/click_marker.png" width="380"> <img src="docs/screenshots/lotus_sound.png" width="380">
 
 ---
 
@@ -38,7 +72,8 @@
 
 1. Справа на странице репозитория откройте **Releases** → последнюю версию.
 2. В блоке **Assets** скачайте **CCC.exe**.
-3. Положите файл в удобную папку и запустите (установка не нужна, настройки хранятся рядом с программой).
+3. Положите файл в удобную папку и запустите (установка не нужна). Настройки хранятся в `%APPDATA%\CCC`, поэтому новая версия, скачанная в любую папку, подхватит их сама.
+4. Меню настроек — правой кнопкой по значку CCC в трее (справа внизу, возле часов).
 
 Для маркера, рангов и сборок в магазине в параметрах запуска Dota 2 в Steam нужно добавить `-language russian`.
 
@@ -60,6 +95,6 @@
 
 * Python 3 + PyQt5, запуск: `pythonw main.py`.
 * Устройство проекта, что делать после патча Dota и журнал изменений — в [NOTES.md](NOTES.md).
-* Сборка `.exe`: `pyinstaller CCC.spec`.
+* Сборка `.exe`: `pyinstaller CCC.spec`. Exe в релизах собирает GitHub Actions из кода тега (`.github/workflows/release.yml`), рядом лежит его SHA-256.
 
 Dota 2 и её ресурсы (иконки, картинки интерфейса) принадлежат Valve Corporation. Проект не связан с Valve.
