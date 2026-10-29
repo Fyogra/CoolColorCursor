@@ -1,0 +1,42 @@
+name: release
+
+# exe собирается здесь, из кода тега релиза, а не на чьём-то компьютере: любой может сверить исходники и сборку
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Тег релиза, к которому приложить exe (например v.2.0.7)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - run: pyinstaller --noconfirm CCC.spec
+      - name: Upload exe
+        shell: bash
+        run: |
+          sha=$(sha256sum dist/CCC.exe | cut -d' ' -f1)
+          echo "$sha  CCC.exe" > dist/CCC.exe.sha256
+          gh release upload "$TAG" dist/CCC.exe dist/CCC.exe.sha256 --clobber
+          body=$(gh release view "$TAG" --json body -q .body | sed '/^Собрано GitHub Actions/,$d')
+          gh release edit "$TAG" --notes "$body
+
+          Собрано GitHub Actions из исходников тега $TAG: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          SHA-256 CCC.exe: \`$sha\`"
