@@ -259,7 +259,8 @@ class SlotTile(QLabel):
         if path:
             ok, err = rank_mod.import_image(path, self.slot, self.editor.set_name)
             self.editor.lbl_status.setText("" if ok else err)
-            self.refresh()
+            for tile in self.editor.tiles:           # звезда меняется сразу во всех пяти ячейках
+                tile.refresh()
 
 
 class SetEditor(FramelessCard):
@@ -277,16 +278,20 @@ class SetEditor(FramelessCard):
         title.setStyleSheet(f"color: {ACCENT};")
         title.setAlignment(Qt.AlignCenter)
         self.body.addWidget(title)
-        hint = caption("Клик — своя картинка (PNG, JPG…), правый клик — вернуть родную. "
-                       "Картинка сама подгоняется под размер, маленькая версия медали делается тоже.", size=8, color=DIM)
+        hint = caption("Клик — своя картинка (PNG, JPG…), правый клик — вернуть родную. Картинка любого размера "
+                       "сама встаёт на место родной, маленькая версия медали делается тоже. Для звёзд хватит "
+                       "одной звезды — она расставится во всех пяти вариантах.", size=8, color=DIM)
         hint.setWordWrap(True)
         self.body.addWidget(hint)
         grid = QGridLayout()
         grid.setSpacing(6)
+        self.tiles = []
         for i, (slot, name) in enumerate(rank_mod.SLOTS):
             cell = QVBoxLayout()
             cell.setSpacing(2)
-            cell.addWidget(SlotTile(self, slot, name), 0, Qt.AlignHCenter)
+            tile = SlotTile(self, slot, name)
+            self.tiles.append(tile)
+            cell.addWidget(tile, 0, Qt.AlignHCenter)
             lbl = caption(name, size=7, color=DIM)
             lbl.setAlignment(Qt.AlignCenter)
             cell.addWidget(lbl)

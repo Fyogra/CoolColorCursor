@@ -139,16 +139,67 @@ def import_vpk(path: str) -> Tuple[bool, str]:
     return True, set_name
 
 
-def _encode(template: bytes, img) -> bytes:
-    """Картинка в формате текстуры-образца: вписываем с сохранением пропорций по центру."""
+def _alpha(data: bytes):
+    """(ширина, высота, байты альфы) текстуры-образца."""
+    start, w, h = _data_offset(data)
+    return w, h, data[start + 3::4]
+
+
+def _boxes(template: bytes, parts: int = 1):
+    """Где в родной текстуре нарисовано: рамки непрозрачного. parts > 1 — столько звёзд в ряд (pipN):
+    точки раскладываются на parts групп по горизонтали (звёзды могут касаться, поэтому не по связности)."""
+    w, h, alpha = _alpha(template)
+    pts = [(i % w, i // w) for i, a in enumerate(alpha) if a > 20]
+    if not pts:
+        return [(0, 0, w, h)]
+    if parts == 1:
+        xs, ys = [x for x, _ in pts], [y for _, y in pts]
+        return [(min(xs), min(ys), max(xs) + 1, max(ys) + 1)]
+    lo, hi = min(x for x, _ in pts), max(x for x, _ in pts)
+    centers = [lo + (hi - lo) * (k + 0.5) / parts for k in range(parts)]
+    for _ in range(10):                                    # k-средних по x: центры звёзд
+        groups = [[] for _ in centers]
+        for x, y in pts:
+            groups[min(range(parts), key=lambda k: abs(x - centers[k]))].append((x, y))
+        centers = [sum(x for x, _ in g) / len(g) if g else c for g, c in zip(groups, centers)]
+    return [(min(x for x, _ in g), min(y for _, y in g), max(x for x, _ in g) + 1, max(y for _, y in g) + 1)
+            for g in groups if g]
+
+
+def _trim(img):
+    """Картинка без прозрачных полей (ищем по уменьшенной копии — у больших картинок миллионы точек)."""
+    from PyQt5.QtCore import Qt
+    if not img.hasAlphaChannel():
+        return img
+    small = img.scaled(256, 256, Qt.KeepAspectRatio, Qt.FastTransformation)
+    sw, sh = small.width(), small.height()
+    xs, ys = [], []
+    for y in range(sh):
+        for x in range(sw):
+            if (small.pixel(x, y) >> 24) > 20:
+                xs.append(x)
+                ys.append(y)
+    if not xs:
+        return img
+    kx, ky = img.width() / sw, img.height() / sh
+    x0, y0 = int(min(xs) * kx), int(min(ys) * ky)
+    return img.copy(x0, y0, int((max(xs) + 1) * kx) - x0, int((max(ys) + 1) * ky) - y0)
+
+
+def _encode(template: bytes, img, parts: int = 1) -> bytes:
+    """Картинка в формате текстуры-образца: вписываем туда, где нарисована родная иконка, с сохранением
+    пропорций. Для звёзд (parts = 1..5) одна картинка звезды ставится на место каждой родной звезды."""
     from PyQt5.QtCore import Qt
     from PyQt5.QtGui import QImage, QPainter
     start, w, h = _data_offset(template)
     canvas = QImage(w, h, QImage.Format_ARGB32)
     canvas.fill(Qt.transparent)
-    scaled = img.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    img = _trim(img)
     p = QPainter(canvas)
-    p.drawImage((w - scaled.width()) // 2, (h - scaled.height()) // 2, scaled)
+    p.setRenderHint(QPainter.SmoothPixmapTransform)
+    for x0, y0, x1, y1 in _boxes(template, parts):
+        scaled = img.scaled(x1 - x0, y1 - y0, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        p.drawImage(x0 + (x1 - x0 - scaled.width()) // 2, y0 + (y1 - y0 - scaled.height()) // 2, scaled)
     p.end()
     return template[:start] + canvas.constBits().asstring(w * h * 4)
 
@@ -164,19 +215,22 @@ def create_set(name: str) -> str:
 
 
 def import_image(path: str, slot: str, set_name: str = MY_SET) -> Tuple[bool, str]:
-    """Своя картинка для иконки slot ('rank5', 'rank8a', 'pip3'); у медалей заодно делается маленькая версия."""
+    """Своя картинка для иконки slot ('rank5', 'rank8a', 'pip3'). Размер и место подгоняются под родную иконку;
+    у медалей заодно делается маленькая версия. Для звёзд хватает одной звезды: она расставляется по местам
+    родных звёзд сразу во всех пяти вариантах (★…★★★★★)."""
     from PyQt5.QtGui import QImage
     img = QImage(path)
     if img.isNull():
         return False, "Не получилось открыть картинку."
     img = img.convertToFormat(QImage.Format_ARGB32)
-    names = [slot]
-    if slot.startswith("rank"):
+    if slot.startswith("pip"):
+        names = [(f"pip{n}", n) for n in range(1, MAX_STARS + 1)]
+    else:
         code = slot[4:]
-        names.append(f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini")
+        names = [(slot, 1), (f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini", 1)]
     try:
-        for name in names:
-            data = _encode(_native(f"{ICON_DIR}{name}_psd.vtex_c"), img)
+        for name, parts in names:
+            data = _encode(_native(f"{ICON_DIR}{name}_psd.vtex_c"), img, parts)
             _save_to_set(set_name, f"{name}_psd.vtex_c", data)
     except (OSError, KeyError, ValueError, struct.error) as e:
         return False, f"Не получилось сохранить картинку: {e}"

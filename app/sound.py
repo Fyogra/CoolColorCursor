@@ -49,6 +49,7 @@ class SoundDialog(FramelessCard):
         btn_pick.clicked.connect(self._pick_file)
         btn_default = make_button("Встроенный", height=30, font=QFont(FONT, 9),
                                   style=outline_button_style(DIM, radius=14))
+        btn_default.setMinimumWidth(110)
         btn_default.clicked.connect(lambda: self._set_file(""))
         files.addWidget(btn_pick, 1)
         files.addWidget(btn_default)
@@ -86,10 +87,12 @@ class SoundDialog(FramelessCard):
         buttons = QHBoxLayout()
         btn_test = make_button("🔔 Проверить", height=30, font=QFont(FONT, 9, QFont.Bold),
                                style=outline_button_style(ACCENT, radius=14))
+        btn_test.setMinimumWidth(130)
         btn_test.clicked.connect(self._test)
         btn_close = make_button("Готово", height=30, font=QFont(FONT, 9, QFont.Bold), style=(
             f"QPushButton {{ background: {ACCENT}; color: #000; border: none; border-radius: 14px; }}"
             " QPushButton:hover { background: #00cc99; }"))
+        btn_close.setMinimumWidth(100)
         btn_close.clicked.connect(self.accept)
         buttons.addWidget(btn_test)
         buttons.addStretch()
