@@ -181,6 +181,7 @@ class Settings:
         self.lotus_alert = 5         # за сколько секунд до лотуса звенеть, 0..30 (0 — в момент появления)
         self.hud_hold_alt = True     # True — HUD виден только пока зажат Alt (поведение по умолчанию)
         self.only_in_dota = True     # эффект только пока в фокусе Dota 2
+        self.trail_mode = "dota"     # след курсора: "dota" — только в Dota 2, "all" — везде, "off" — выключен
         self.ingame_marker = False       # свой маркер установлен в игру подменой файлов (свой пак в dota_russian)
         self.ingame_petals = "#ff0055"   # цвет лепестков маркера в игре
         self.ingame_rest = "#00ccff"     # цвет остального (центр, свечение, кольца)
@@ -229,6 +230,8 @@ class Settings:
         s.lotus_alert = _clamp(raw.get("lotus_alert", 5), 0, 30, 5)
         s.hud_hold_alt = bool(raw.get("hud_hold_alt", True))
         s.only_in_dota = bool(raw.get("only_in_dota", True))
+        mode = raw.get("trail_mode", "dota")
+        s.trail_mode = mode if mode in ("dota", "all", "off") else "dota"
         s.ingame_marker = bool(raw.get("ingame_marker", False))
         s.ingame_petals = str(raw.get("ingame_petals", s.ingame_petals))
         s.ingame_rest = str(raw.get("ingame_rest", s.ingame_rest))
@@ -279,6 +282,7 @@ class Settings:
             "lotus_alert": self.lotus_alert,
             "hud_hold_alt": self.hud_hold_alt,
             "only_in_dota": self.only_in_dota,
+            "trail_mode": self.trail_mode,
             "ingame_marker": self.ingame_marker,
             "ingame_petals": self.ingame_petals,
             "ingame_rest": self.ingame_rest,

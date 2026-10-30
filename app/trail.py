@@ -171,8 +171,10 @@ def keep_on_top(widget: QWidget) -> None:
 class MouseTrailOverlay(QWidget):
     """Прозрачное «сквозное» окно на весь рабочий стол, в котором рисуется шлейф."""
 
-    MAX_POINTS = 400             # жёсткий лимит точек шлейфа
-    MAX_INTERP_STEPS = 80        # лимит промежуточных точек за один тик
+    MAX_POINTS = 400             # жёсткий лимит снятых положений курсора
+    MAX_INTERP_STEPS = 80        # лимит точек кривой между двумя соседними положениями
+    SAMPLE_HZ = 120              # как часто снимать положение курсора — не реже, чем 120 раз в секунду
+    CURVE_STEP = 2.0             # шаг точек кривой при рисовании, px
     FREEZE_GAP = 0.1             # пауза между тиками (с), после которой считаем, что система «подвисла»
     FULL_REPAINT = False         # True — перерисовывать весь экран (если вдруг появятся артефакты)
     KEEP_HEAD_WHEN_IDLE = False  # True — как в старой версии: «точка» остаётся под неподвижным курсором
@@ -184,7 +186,7 @@ class MouseTrailOverlay(QWidget):
         self.color1 = QColor(color1)
         self.color2 = QColor(color2)
 
-        self.points = deque()  # (QPointF, момент создания)
+        self.points = deque()  # снятые положения курсора: (QPointF, момент); кривая строится по ним при рисовании
         self._last_pos = None
         self._last_tick = time.monotonic()
         self._dirty = QRect()  # где шлейф был нарисован в прошлый раз
@@ -197,8 +199,8 @@ class MouseTrailOverlay(QWidget):
         self.setGeometry(self._desktop_rect())
 
         self.refresh_rate = self._detect_refresh_rate()
-        interval = max(1, int(1000 / self.refresh_rate))
-        self.step_distance = max(1.0, 3.0 * (60.0 / self.refresh_rate))
+        # На 60 Гц курсор за кадр успевает пролететь десятки пикселей — снимаем его чаще кадров
+        interval = max(1, int(1000 / max(self.refresh_rate, self.SAMPLE_HZ)))
         log.info("Определена герцовка: %s Гц. Интервал таймера: %s мс", self.refresh_rate, interval)
 
         self.timer = QTimer(self)
@@ -264,13 +266,6 @@ class MouseTrailOverlay(QWidget):
 
         last = self._last_pos
         moved = last is None or cur != last
-        if moved and last is not None:
-            dist = math.hypot(cur.x() - last.x(), cur.y() - last.y())
-            if dist > self.step_distance:
-                steps = min(int(dist / self.step_distance), self.MAX_INTERP_STEPS)
-                dx, dy = (cur.x() - last.x()) / steps, (cur.y() - last.y()) / steps
-                for i in range(1, steps):
-                    self.points.append((QPointF(last.x() + dx * i, last.y() + dy * i), now))
         if moved or self.KEEP_HEAD_WHEN_IDLE:
             self.points.append((cur, now))
         self._last_pos = cur
@@ -284,7 +279,7 @@ class MouseTrailOverlay(QWidget):
             return QRect()
         xs = [p.x() for p, _ in self.points]
         ys = [p.y() for p, _ in self.points]
-        margin = int(self.max_width) + 3
+        margin = int(self.max_width) + 12      # кривая может чуть выйти за снятые точки на поворотах
         left, top = int(min(xs)) - margin, int(min(ys)) - margin
         return QRect(left, top, int(max(xs)) + margin + 1 - left, int(max(ys)) + margin + 1 - top)
 
@@ -310,8 +305,33 @@ class MouseTrailOverlay(QWidget):
         now = time.monotonic()
         self._paint_trail(p, now)
 
+    def _curve(self):
+        """Плавная кривая через снятые положения курсора (сплайн Катмулла–Рома) с моментом времени в каждой
+        точке: так и форма без углов, и цвет с толщиной угасают плавно, а не ступеньками по кадрам."""
+        raw = list(self.points)
+        n = len(raw)
+        out = []
+        for i in range(n - 1):
+            p1, t1 = raw[i]
+            p2, t2 = raw[i + 1]
+            p0 = raw[i - 1][0] if i > 0 else p1
+            p3 = raw[i + 2][0] if i + 2 < n else p2
+            steps = max(1, min(self.MAX_INTERP_STEPS,
+                               int(math.hypot(p2.x() - p1.x(), p2.y() - p1.y()) / self.CURVE_STEP)))
+            for k in range(steps):
+                u = k / steps
+                u2, u3 = u * u, u * u * u
+                x = 0.5 * (2 * p1.x() + (p2.x() - p0.x()) * u + (2 * p0.x() - 5 * p1.x() + 4 * p2.x() - p3.x()) * u2
+                           + (3 * p1.x() - p0.x() - 3 * p2.x() + p3.x()) * u3)
+                y = 0.5 * (2 * p1.y() + (p2.y() - p0.y()) * u + (2 * p0.y() - 5 * p1.y() + 4 * p2.y() - p3.y()) * u2
+                           + (3 * p1.y() - p0.y() - 3 * p2.y() + p3.y()) * u3)
+                out.append((QPointF(x, y), t1 + (t2 - t1) * u))
+        if raw:
+            out.append(raw[-1])
+        return out
+
     def _paint_trail(self, p: QPainter, now: float) -> None:
-        points = self.points
+        points = self._curve()
         if len(points) < 2:
             return
         r1, g1, b1 = self.color1.red(), self.color1.green(), self.color1.blue()

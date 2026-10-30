@@ -8,7 +8,7 @@ import time
 from datetime import date
 from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
+from PyQt5.QtWidgets import QActionGroup, QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
 from typing import Optional
 from app import dota_mod, ingame_marker, rank_mod, shop_mod
 from app.rank_window import RankDialog
@@ -109,6 +109,8 @@ class ControlPanel(QWidget):
         QTimer.singleShot(15000, self._refresh_shop_pack)
         self._restore_timers()
         self._restore_launcher()
+        if self.settings.trail_mode != "off":
+            self.set_trail_mode(self.settings.trail_mode, persist=False)
 
         # Один общий тик на всё: таймеры, колокольчик, герой для сборок, статус GSI
         self._tick_timer = QTimer(self)
@@ -174,10 +176,21 @@ class ControlPanel(QWidget):
 
         # ── След курсора: заголовок с переключателем, ползунки ──
         # След включается сам по «Открыть Доту»; здесь — выключить/включить вручную
-        self.btn_toggle = make_button(height=26, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
-        self.btn_toggle.clicked.connect(self.toggle_trail)
-        self.btn_toggle.setMinimumWidth(128)
-        root.addLayout(self._section("СЛЕД КУРСОРА", self.btn_toggle))
+        # Режим следа: только в Dota 2, везде или выключен (таймеры и сборки при этом всё равно только в Dota)
+        modes_box = QWidget()
+        trail_modes = QHBoxLayout(modes_box)
+        trail_modes.setContentsMargins(0, 0, 0, 0)
+        trail_modes.setSpacing(4)
+        self.trail_buttons = {}
+        for mode, tip in (("dota", "След только в Dota 2"), ("all", "След везде: на рабочем столе и в любых окнах"),
+                          ("off", "След выключен")):
+            btn = make_button(height=24, font=QFont(FONT_SYMBOL, 8, QFont.Bold))
+            btn.setToolTip(tip)
+            btn.setMinimumWidth(66 if mode == "off" else 80)
+            btn.clicked.connect(lambda _=False, m=mode: self.set_trail_mode(m))
+            trail_modes.addWidget(btn)
+            self.trail_buttons[mode] = btn
+        root.addLayout(self._section("СЛЕД", modes_box))
 
         self.lbl_width = caption(f"ТОЛЩИНА: {s.max_width} px", size=9, color=DIM)
         root.addWidget(self.lbl_width)
@@ -355,8 +368,14 @@ class ControlPanel(QWidget):
             f" QMenu::item:selected {{ background-color: {ACCENT}; color: #000; }}")
 
         menu.addAction("Открыть настройки").triggered.connect(self.show_from_tray)
-        self.act_toggle = menu.addAction("Включить след")
-        self.act_toggle.triggered.connect(self.toggle_trail)
+        trail_group = QActionGroup(menu)
+        self.trail_actions = {}
+        for mode, text in (("dota", "След: только в Dota 2"), ("all", "След: везде"), ("off", "След: выключен")):
+            act = menu.addAction(text)
+            act.setCheckable(True)
+            act.triggered.connect(lambda _=False, m=mode: self.set_trail_mode(m))
+            trail_group.addAction(act)
+            self.trail_actions[mode] = act
 
         menu.addSeparator()
         self.act_builds = menu.addAction("Сборки на героя")
@@ -608,24 +627,31 @@ class ControlPanel(QWidget):
             self.overlay.update()
         self.schedule_save()
 
-    def toggle_trail(self):
-        if self.overlay is None:
-            log.info("Эффект включен")
-            s = self.settings
-            self.overlay = MouseTrailOverlay(s.fade_ms / 1000.0, s.max_width, *s.colors)
-            self.overlay.show()
-            self._raise_overlays()  # шлейф показался позже и мог лечь поверх таймеров и иконки
+    def set_trail_mode(self, mode: str, persist: bool = True):
+        """След: "dota" — рисуется только пока активна Dota 2, "all" — везде, "off" — выключен."""
+        if mode == "off":
+            if self.overlay is not None:
+                log.info("След выключен")
+                self.overlay.shutdown()
+                self.overlay = None
         else:
-            log.info("Эффект выключен")
-            self.overlay.shutdown()
-            self.overlay = None
+            if self.overlay is None:
+                s = self.settings
+                self.overlay = MouseTrailOverlay(s.fade_ms / 1000.0, s.max_width, *s.colors)
+                self.overlay.show()
+                self._raise_overlays()  # шлейф показался позже и мог лечь поверх таймеров и иконки
+            self.overlay.focus.only_in_dota = mode == "dota"
+            log.info("След: %s", "только в Dota 2" if mode == "dota" else "везде")
+        self.settings.trail_mode = mode
+        if persist:
+            self.schedule_save()
         self._refresh_toggle_ui()
 
     def on_dota_button(self):
         hwnd = dota_window()
         if not hwnd:
             if self.overlay is None:                 # с запуском игры след включается сам
-                self.toggle_trail()
+                self.set_trail_mode("dota")
             self.launch_dota()
         elif self._ask("ЗАКРЫТЬ ДОТУ", "Закрыть Dota 2?\n\nЕсли ты сейчас в матче — выйдешь из игры.", "Закрыть"):
             close_window(dota_window())              # пока висел вопрос, игру могли закрыть и так
@@ -659,13 +685,14 @@ class ControlPanel(QWidget):
             dialog.deleteLater()
 
     def _refresh_toggle_ui(self):
-        active = self.overlay is not None
-        if hasattr(self, "btn_toggle"):
-            self.btn_toggle.setText("✨ СЛЕД: ВКЛ" if active else "✨ СЛЕД: ВЫКЛ")
-            self.btn_toggle.setToolTip("Выключить след курсора" if active else "Включить след курсора")
-            self.btn_toggle.setStyleSheet(outline_button_style(ACCENT if active else DIM, radius=13))
-        if hasattr(self, "act_toggle"):
-            self.act_toggle.setText("Выключить след" if active else "Включить след")
+        current = self.settings.trail_mode
+        texts = {"dota": "🎮 В DOTA", "all": "🖥 ВЕЗДЕ", "off": "✖ ВЫКЛ"}
+        for mode, btn in getattr(self, "trail_buttons", {}).items():
+            on = mode == current
+            btn.setText(texts[mode])
+            btn.setStyleSheet(outline_button_style((DANGER if mode == "off" else ACCENT) if on else DIM, radius=12))
+        for mode, act in getattr(self, "trail_actions", {}).items():
+            act.setChecked(mode == current)
 
     # ── таймеры Dota 2 ──────────────────────────────────────────────────────
     def _restore_timers(self):
