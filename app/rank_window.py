@@ -255,7 +255,7 @@ class SlotTile(QLabel):
             rank_mod.reset_slot(self.editor.set_name, self.slot)
             self.refresh()
             return
-        path, _ = QFileDialog.getOpenFileName(self, "Картинка", "", "Картинки (*.png *.jpg *.jpeg *.webp *.bmp)")
+        path, _ = QFileDialog.getOpenFileName(self, "Картинка", "", "Картинки (*.png *.gif *.jpg *.jpeg *.webp *.bmp)")
         if path:
             ok, err = rank_mod.import_image(path, self.slot, self.editor.set_name)
             self.editor.lbl_status.setText("" if ok else err)
@@ -278,9 +278,9 @@ class SetEditor(FramelessCard):
         title.setStyleSheet(f"color: {ACCENT};")
         title.setAlignment(Qt.AlignCenter)
         self.body.addWidget(title)
-        hint = caption("Клик — своя картинка (PNG, JPG…), правый клик — вернуть родную. Картинка любого размера "
+        hint = caption("Клик — своя картинка (PNG, JPG, GIF), правый клик — вернуть родную. Картинка любого размера "
                        "сама встаёт на место родной, маленькая версия медали делается тоже. Для звёзд хватит "
-                       "одной звезды — она расставится во всех пяти вариантах.", size=8, color=DIM)
+                       "одной звезды — она расставится во всех пяти вариантах. GIF на медали будет анимацией в меню Dota.", size=8, color=DIM)
         hint.setWordWrap(True)
         self.body.addWidget(hint)
         grid = QGridLayout()

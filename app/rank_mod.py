@@ -5,6 +5,7 @@
 """
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import struct
@@ -26,6 +27,95 @@ REAL_MEDALS = MEDALS[:9]
 SLOTS = tuple((f"rank{code}", name) for code, name in MEDALS) + tuple(
     (f"pip{n}", "★" * n) for n in range(1, 6))                  # настоящий ранг: особые медали Титана считаем обычным Титаном
 MAX_STARS = 5
+
+# анимация медали: кадры лежат в наборе как anim/rank<код>/<номер>_psd.vtex_c (текстуры крупнее родной игра не рисует,
+# поэтому кадр — отдельный файл); переключает их JS, дописанный в скрипты, которые выполняются в главном меню
+ANIM_DIR = "anim"
+ANIM_MEDALS = tuple(code for code, _name in MEDALS)
+ANIM_SCRIPTS = ("panorama/scripts/hero_model_overlay.vjs_c", "panorama/scripts/popups/popup_settings_reborn.vjs_c")
+MAX_FRAMES = 24
+MIN_DELAY = 40                                                   # мс: быстрее кадры всё равно не успеют смениться
+ANIM_JS = r"""
+;(function () {
+    var ANIM = __ANIM__, items = [], ticks = 0, n;
+    for (n in ANIM) {
+        ANIM[n].t = 0;
+        for (var i = 0; i < ANIM[n].d.length; i++) ANIM[n].t += ANIM[n].d[i];
+    }
+    var root = $.GetContextPanel();
+    while (root.GetParent()) root = root.GetParent();
+    function rankOf(p) {
+        for (var q = p; q; q = q.GetParent()) {
+            if (q.BHasClass("LeaderboardTop1") || q.BHasClass("LeaderboardTop10")) return "8c";
+            if (q.BHasClass("LeaderboardTop100")) return "8b";
+            if (q.BHasClass("LeaderboardTop5000")) return "8a";
+            for (var r = 0; r < 9; r++)
+                if (q.BHasClass("RankTier" + r)) return String(r);
+        }
+        return "";
+    }
+    function url(a, k) {
+        return 'url("s2r://panorama/images/rank_tier_icons/anim/rank' + a.m + "/" + k + '_psd.vtex")';
+    }
+    function preload(a) {
+        // игра выгружает картинку, которую никто не показывает: без этого кадры грузились бы заново и медаль мигала
+        a.ready = ticks + 60;
+        for (var k = 0; k < a.d.length; k++) {
+            var h = $.CreatePanel("Panel", root, "");
+            h.hittest = false;
+            h.style.width = "1px";
+            h.style.height = "1px";
+            h.style.opacity = "0.01";
+            h.style.backgroundImage = url(a, k);
+        }
+    }
+    function refresh() {
+        items = [];
+        var found = root.FindChildrenWithClassTraverse("RankTierImage");
+        for (var i = 0; i < found.length; i++) {
+            var p = found[i];
+            if (p.BHasClass("Minimal")) continue;
+            var r = rankOf(p);
+            if (ANIM[r] && p.FindChildrenWithClassTraverse("RankTierImage").length) {
+                // медаль из двух вложенных панелей (окно рангов): непрозрачная гифка торчала бы из-под внутренней
+                p.style.backgroundImage = "none";
+                p.cccAnim = true;
+                continue;
+            }
+            if (ANIM[r]) {
+                if (ANIM[r].ready === undefined) preload(ANIM[r]);
+                items.push({ p: p, n: r, k: -1 });
+            }
+            else if (p.cccAnim) { p.style.backgroundImage = null; p.cccAnim = false; }
+        }
+    }
+    function frameOf(a, now) {
+        var t = now % a.t;
+        for (var i = 0; i < a.d.length; i++) {
+            t -= a.d[i];
+            if (t < 0) return i;
+        }
+        return 0;
+    }
+    function tick() {
+        try {
+            if (ticks++ % 20 === 0) refresh();
+            var now = Date.now();
+            for (var i = 0; i < items.length; i++) {
+                var it = items[i], a = ANIM[it.n];
+                if (!it.p.IsValid() || ticks < a.ready) continue;
+                var k = frameOf(a, now);
+                if (k === it.k) continue;
+                it.k = k;
+                it.p.cccAnim = true;
+                it.p.style.backgroundImage = url(a, k);
+            }
+        } catch (e) { $.Msg("CCC rank anim: " + e); }
+        $.Schedule(0.05, tick);
+    }
+    $.Schedule(1.0, tick);
+})();
+"""
 
 
 def has_stars(medal: str) -> bool:
@@ -95,6 +185,8 @@ def _set_files(set_name: str) -> Dict[str, bytes]:
     if root and os.path.isdir(root):
         for folder, _dirs, names in os.walk(root):
             for n in names:
+                if n.endswith(".json"):                    # задержки кадров анимации в пак не нужны
+                    continue
                 full = os.path.join(folder, n)
                 rel = os.path.relpath(full, root).replace(os.sep, "/")
                 with open(full, "rb") as f:
@@ -166,11 +258,12 @@ def _boxes(template: bytes, parts: int = 1):
             for g in groups if g]
 
 
-def _trim(img):
-    """Картинка без прозрачных полей (ищем по уменьшенной копии — у больших картинок миллионы точек)."""
+def _trim_box(img):
+    """(x, y, ширина, высота) картинки без прозрачных полей (ищем по уменьшенной копии — у больших картинок
+    миллионы точек); None — обрезать нечего."""
     from PyQt5.QtCore import Qt
     if not img.hasAlphaChannel():
-        return img
+        return None
     small = img.scaled(256, 256, Qt.KeepAspectRatio, Qt.FastTransformation)
     sw, sh = small.width(), small.height()
     xs, ys = [], []
@@ -180,13 +273,18 @@ def _trim(img):
                 xs.append(x)
                 ys.append(y)
     if not xs:
-        return img
+        return None
     kx, ky = img.width() / sw, img.height() / sh
     x0, y0 = int(min(xs) * kx), int(min(ys) * ky)
-    return img.copy(x0, y0, int((max(xs) + 1) * kx) - x0, int((max(ys) + 1) * ky) - y0)
+    return x0, y0, int((max(xs) + 1) * kx) - x0, int((max(ys) + 1) * ky) - y0
 
 
-def _encode(template: bytes, img, parts: int = 1) -> bytes:
+def _trim(img):
+    box = _trim_box(img)
+    return img.copy(*box) if box else img
+
+
+def _encode(template: bytes, img, parts: int = 1, trim: bool = True) -> bytes:
     """Картинка в формате текстуры-образца: вписываем туда, где нарисована родная иконка, с сохранением
     пропорций. Для звёзд (parts = 1..5) одна картинка звезды ставится на место каждой родной звезды."""
     from PyQt5.QtCore import Qt
@@ -194,7 +292,8 @@ def _encode(template: bytes, img, parts: int = 1) -> bytes:
     start, w, h = _data_offset(template)
     canvas = QImage(w, h, QImage.Format_ARGB32)
     canvas.fill(Qt.transparent)
-    img = _trim(img)
+    if trim:
+        img = _trim(img)
     p = QPainter(canvas)
     p.setRenderHint(QPainter.SmoothPixmapTransform)
     for x0, y0, x1, y1 in _boxes(template, parts):
@@ -202,6 +301,78 @@ def _encode(template: bytes, img, parts: int = 1) -> bytes:
         p.drawImage(x0 + (x1 - x0 - scaled.width()) // 2, y0 + (y1 - y0 - scaled.height()) // 2, scaled)
     p.end()
     return template[:start] + canvas.constBits().asstring(w * h * 4)
+
+
+def _read_frames(path: str):
+    """Кадры анимированной картинки: [(QImage, задержка в мс)] не больше MAX_FRAMES, с общей длительностью как в
+    файле и одной обрезкой на все кадры (иначе картинка дрожала бы). Пусто — картинка не анимированная."""
+    from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QImage, QImageReader, QPainter
+    reader = QImageReader(path)
+    if not reader.supportsAnimation():
+        return []
+    frames = []
+    while True:
+        img = reader.read()
+        if img.isNull():
+            break
+        delay = reader.nextImageDelay()
+        frames.append((img.convertToFormat(QImage.Format_ARGB32), delay if delay > 0 else 100))
+    if len(frames) < 2:
+        return []
+    if len(frames) > MAX_FRAMES:
+        marks = [i * len(frames) // MAX_FRAMES for i in range(MAX_FRAMES + 1)]
+        frames = [(frames[a][0], sum(x[1] for x in frames[a:b])) for a, b in zip(marks, marks[1:])]
+    all_frames = QImage(frames[0][0].size(), QImage.Format_ARGB32)
+    all_frames.fill(Qt.transparent)
+    p = QPainter(all_frames)
+    for img, _delay in frames:
+        p.drawImage(0, 0, img)
+    p.end()
+    box = _trim_box(all_frames)
+    return [(img.copy(*box) if box else img, max(delay, MIN_DELAY)) for img, delay in frames]
+
+
+def _anim_delays(code: str, set_name: str):
+    """Задержки кадров анимации медали в наборе; None — медаль не анимированная."""
+    if not set_name:
+        return None
+    try:
+        with open(os.path.join(SETS_DIR, set_name, ANIM_DIR, f"rank{code}", "delays.json"), encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return None
+
+
+def _anim_script(real: str, show: str, set_name: str) -> Optional[str]:
+    """JS анимации: настоящий ранг показывает кадры выбранной медали, остальные — свои. Как и в build_files,
+    настоящий Титан подменяется вместе с особыми медалями."""
+    swapped = [real] + (["8a", "8b", "8c"] if real == "8" else [])
+    table = {}
+    for code in ANIM_MEDALS:
+        src = show if code in swapped else code
+        delays = _anim_delays(src, set_name)
+        if delays:
+            table[code] = {"m": src, "d": delays}
+    return ANIM_JS.replace("__ANIM__", json.dumps(table, separators=(",", ":"))) if table else None
+
+
+def _append_js(blob: bytes, js: str) -> bytes:
+    """Скрипт Dota с нашим кодом в конце блока DATA."""
+    _fs, _hv, _ver, off, cnt = struct.unpack_from("<IHHII", blob, 0)
+    pos, last = 8 + off, None
+    for _ in range(cnt):
+        rel, size = struct.unpack_from("<II", blob, pos + 4)
+        last = (blob[pos:pos + 4], pos + 4 + rel, size, pos)
+        pos += 12
+    name, start, size, head = last
+    if name != b"DATA" or start + size != len(blob):
+        raise ValueError("скрипт меню в игре изменился, анимации нужна правка сборщика")
+    data = js.encode("utf-8")
+    out = bytearray(blob) + data
+    struct.pack_into("<I", out, 0, len(out))
+    struct.pack_into("<I", out, head + 8, size + len(data))
+    return bytes(out)
 
 
 def create_set(name: str) -> str:
@@ -217,21 +388,33 @@ def create_set(name: str) -> str:
 def import_image(path: str, slot: str, set_name: str = MY_SET) -> Tuple[bool, str]:
     """Своя картинка для иконки slot ('rank5', 'rank8a', 'pip3'). Размер и место подгоняются под родную иконку;
     у медалей заодно делается маленькая версия. Для звёзд хватает одной звезды: она расставляется по местам
-    родных звёзд сразу во всех пяти вариантах (★…★★★★★)."""
+    родных звёзд сразу во всех пяти вариантах (★…★★★★★). GIF на медали становится анимацией, а первый кадр —
+    её обычной картинкой (там, где анимации нет); на звёздах берётся только первый кадр."""
     from PyQt5.QtGui import QImage
     img = QImage(path)
     if img.isNull():
         return False, "Не получилось открыть картинку."
     img = img.convertToFormat(QImage.Format_ARGB32)
+    code = slot[4:] if slot.startswith("rank") else ""
+    frames = _read_frames(path) if code in ANIM_MEDALS else []
+    if frames:
+        img = frames[0][0]
     if slot.startswith("pip"):
         names = [(f"pip{n}", n) for n in range(1, MAX_STARS + 1)]
     else:
-        code = slot[4:]
         names = [(slot, 1), (f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini", 1)]
     try:
         for name, parts in names:
             data = _encode(_native(f"{ICON_DIR}{name}_psd.vtex_c"), img, parts)
             _save_to_set(set_name, f"{name}_psd.vtex_c", data)
+        if code:
+            shutil.rmtree(os.path.join(SETS_DIR, set_name, ANIM_DIR, slot), ignore_errors=True)
+        if frames:
+            template = _native(f"{ICON_DIR}{slot}_psd.vtex_c")
+            for k, (frame, _delay) in enumerate(frames):
+                _save_to_set(set_name, f"{ANIM_DIR}/{slot}/{k}_psd.vtex_c", _encode(template, frame, trim=False))
+            with open(os.path.join(SETS_DIR, set_name, ANIM_DIR, slot, "delays.json"), "w", encoding="utf-8") as f:
+                json.dump([delay for _frame, delay in frames], f)
     except (OSError, KeyError, ValueError, struct.error) as e:
         return False, f"Не получилось сохранить картинку: {e}"
     return True, set_name
@@ -241,6 +424,8 @@ def reset_slot(set_name: str, slot: str) -> None:
     """Вернуть иконке slot в наборе родной вид."""
     code = slot[4:] if slot.startswith("rank") else ""
     names = [slot] + ([f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini"] if code else [])
+    if code:
+        shutil.rmtree(os.path.join(SETS_DIR, set_name, ANIM_DIR, slot), ignore_errors=True)
     for name in names:
         try:
             os.remove(os.path.join(SETS_DIR, set_name, *f"{name}_psd.vtex_c".split("/")))
@@ -283,6 +468,15 @@ def build_files(real: str, real_stars: int, show: str, show_stars: int, set_name
     files = _set_files(set_name)
     for dst, src in pairs:
         files[f"{ICON_DIR}{dst}_psd.vtex_c"] = _icon(src, set_name) if src else _blank(_icon(dst, set_name))
+    js = _anim_script(real, show, set_name)
+    if js:
+        try:
+            for script in ANIM_SCRIPTS:
+                files[script] = _append_js(_native(script), js)
+        except (KeyError, ValueError, struct.error) as e:      # после патча Dota: ранги важнее анимации
+            for script in ANIM_SCRIPTS:
+                files.pop(script, None)
+            log.warning("Анимация медалей выключена: %s", e)
     return files
 
 
