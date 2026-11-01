@@ -9,8 +9,6 @@ from PyQt5.QtWidgets import QApplication, QWidget
 from collections import deque
 from app.config import IS_WINDOWS, log
 
-VK_RBUTTON = 0x02
-WDA_EXCLUDEFROMCAPTURE = 0x11  # Windows 10 2004+: окно видно на мониторе, но не попадает в снимки экрана
 GAME_EXES = ("dota2.exe",)
 
 
@@ -102,10 +100,6 @@ def window_exe(hwnd) -> str:
     return ""
 
 
-def right_button_down() -> bool:
-    return IS_WINDOWS and bool(_user32.GetAsyncKeyState(VK_RBUTTON) & 0x8000)
-
-
 class GameFocus:
     """В фокусе только Dota 2: ни в панели настроек, ни в других окнах эффекта нет.
     Проверка не чаще 4 раз в секунду; only_in_dota=False — считаем, что фокус есть всегда."""
@@ -124,15 +118,6 @@ class GameFocus:
         return self._ok
 
 
-def exclude_from_capture(widget: QWidget) -> None:
-    """Окно остаётся на экране, но пропадает из снимков экрана и записи."""
-    if not IS_WINDOWS:
-        return
-    try:
-        if not _user32.SetWindowDisplayAffinity(int(widget.winId()), WDA_EXCLUDEFROMCAPTURE):
-            log.warning("Не удалось скрыть окно от захвата экрана (нужна Windows 10 2004 или новее)")
-    except Exception as e:  # noqa: BLE001
-        log.warning("Скрытие окна от захвата: %s", e)
 
 
 def apply_overlay_style(widget: QWidget, *, click_through: bool) -> None:

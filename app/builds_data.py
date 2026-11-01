@@ -156,7 +156,6 @@ class DotaConstants:
                 self.ability_ids[int(k)] = str(v)
             except (TypeError, ValueError):
                 pass
-        self.ability_by_name = {v: k for k, v in self.ability_ids.items()}
         self.items_by_id = {v["id"]: k for k, v in self.items.items() if _is_int(v.get("id"))}
 
     @staticmethod

@@ -148,19 +148,7 @@ _BELL_LOCK = threading.Lock()
 # ──────────────────────────────────────────────────────────────────────────────
 #  Глобальные клавиши (нужны поверх игры, обычный Qt-shortcut сюда не достанет)
 # ──────────────────────────────────────────────────────────────────────────────
-VK_SHIFT, VK_CTRL, VK_ALT, VK_SPACE, VK_TAB, VK_CAPITAL = 0x10, 0x11, 0x12, 0x20, 0x09, 0x14
-VK_NAMES = {VK_ALT: "Alt", VK_SHIFT: "Shift", VK_CTRL: "Ctrl", VK_SPACE: "Space", VK_TAB: "Tab",
-            VK_CAPITAL: "CapsLock", 0: "—"}
-
-
-def vk_name(vk: int) -> str:
-    if vk in VK_NAMES:
-        return VK_NAMES[vk]
-    if 0x30 <= vk <= 0x5A:  # '0'..'9' и 'A'..'Z' совпадают с ASCII
-        return chr(vk)
-    if 0x70 <= vk <= 0x7B:
-        return f"F{vk - 0x6F}"
-    return f"0x{vk:02X}"
+VK_ALT = 0x12
 
 
 def is_key_down(vk: int) -> bool:

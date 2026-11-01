@@ -583,20 +583,8 @@ def build() -> Tuple[bool, str]:
         if not data:
             return False, "Нет данных сборок (нет сети?)."
         blob = d._read_file(os.path.join(d.game_dir(), "dota", "pak01_dir.vpk"), JS)
-        _fs, _hv, _ver, off, cnt = struct.unpack_from("<IHHII", blob, 0)
-        pos, last = 8 + off, None
-        for _ in range(cnt):
-            rel, size = struct.unpack_from("<II", blob, pos + 4)
-            last = (blob[pos:pos + 4], pos + 4 + rel, size, pos)
-            pos += 12
-        name, start, size, head_pos = last
-        if name != b"DATA" or start + size != len(blob):
-            return False, "Скрипт магазина в игре изменился, нужна правка сборщика."
-        new_blk = blob[start:start + size] + js.encode("utf-8")
-        out = bytearray(blob[:start]) + new_blk
-        struct.pack_into("<I", out, 0, len(out))
-        struct.pack_into("<I", out, head_pos + 8, len(new_blk))
-        path = d.write_pak("shop", {JS: bytes(out)})
+        out = d.append_to_data(blob, js.encode("utf-8"))
+        path = d.write_pak("shop", {JS: out})
     except PermissionError:
         return False, "Файл занят: закрой Dota 2 и попробуй снова."
     except (OSError, KeyError, ValueError, struct.error) as e:

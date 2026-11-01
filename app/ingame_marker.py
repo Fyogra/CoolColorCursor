@@ -29,13 +29,7 @@ RGB = Tuple[int, int, int]
 def recolor_template(data: bytes, rgb: RGB) -> Optional[bytes]:
     """Заготовка .vpcf_c (KV3 v5, два LZ4-блока) с цветом rgb вместо TEMPLATE_RGB; None — формат не тот."""
     try:
-        _fs, _hv, _ver, block_off, count = struct.unpack_from("<IHHII", data, 0)
-        pos, last = 8 + block_off, None
-        for _ in range(count):
-            rel, size = struct.unpack_from("<II", data, pos + 4)
-            last = (data[pos:pos + 4], pos + 4 + rel, size, pos)
-            pos += 12
-        name, start, size, head_pos = last
+        name, head_pos, start, size = dm.resource_blocks(data)[-1]
         blk = data[start:start + size]
         if name != b"DATA" or start + size != len(data) or blk[:4] != bytes.fromhex("0533564b"):
             return None
@@ -71,13 +65,7 @@ def chevron_texture(original: bytes) -> Optional[bytes]:
     from PyQt5.QtCore import QPointF, Qt
     from PyQt5.QtGui import QBrush, QColor, QImage, QPainter, QPainterPath, QPen, QPolygonF
     try:
-        _fs, _hv, _ver, off, cnt = struct.unpack_from("<IHHII", original, 0)
-        pos, data_off, data_size = 8 + off, None, None
-        for _ in range(cnt):
-            rel, size = struct.unpack_from("<II", original, pos + 4)
-            if original[pos:pos + 4] == b"DATA":
-                data_off, data_size = pos + 4 + rel, size
-            pos += 12
+        data_off, data_size = next(((b[2], b[3]) for b in dm.resource_blocks(original) if b[0] == b"DATA"), (None, None))
         w, h, _depth, fmt, mips = struct.unpack_from("<HHHBB", original, data_off + 20)
         if (w, h, fmt, mips) != (128, 128, 2, 6) or data_off + data_size + 21840 != len(original):
             return None

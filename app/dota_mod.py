@@ -116,10 +116,22 @@ def _save_registry(reg: Dict[str, dict]) -> None:
     os.replace(tmp, REGISTRY)
 
 
+_FINGERPRINTS: Dict[str, Tuple[Tuple[int, int], int]] = {}      # путь -> ((размер, время файла), CRC)
+
+
 def _fingerprint(path: str) -> Tuple[int, int]:
+    """(размер, CRC) файла; пока файл не менялся, заново не читаем: паки с анимацией весят десятки МБ."""
+    st = os.stat(path)
+    key = (st.st_size, st.st_mtime_ns)
+    known = _FINGERPRINTS.get(path)
+    if known and known[0] == key:
+        return st.st_size, known[1]
+    crc = 0
     with open(path, "rb") as f:
-        data = f.read()
-    return len(data), binascii.crc32(data) & 0xFFFFFFFF
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            crc = binascii.crc32(chunk, crc)
+    _FINGERPRINTS[path] = (key, crc)
+    return st.st_size, crc
 
 
 def _register(kind: str, path: Optional[str]) -> None:
@@ -284,6 +296,29 @@ def remove_pak(kind: str) -> None:
 
 def is_installed() -> bool:
     return bool(our_pak("marker"))
+
+
+# ── Файлы ресурсов Source 2 ─────────────────────────────────────────────────
+def resource_blocks(data: bytes) -> list:
+    """Блоки файла ресурса: [(имя, где запись в оглавлении, начало, размер)]."""
+    _fs, _hv, _ver, off, cnt = struct.unpack_from("<IHHII", data, 0)
+    pos, blocks = 8 + off, []
+    for _ in range(cnt):
+        rel, size = struct.unpack_from("<II", data, pos + 4)
+        blocks.append((data[pos:pos + 4], pos, pos + 4 + rel, size))
+        pos += 12
+    return blocks
+
+
+def append_to_data(blob: bytes, extra: bytes) -> bytes:
+    """Файл ресурса с extra в конце блока DATA (он должен быть последним); ValueError — формат не тот."""
+    name, head, start, size = resource_blocks(blob)[-1]
+    if name != b"DATA" or start + size != len(blob):
+        raise ValueError("скрипт в игре изменился, нужна правка сборщика")
+    out = bytearray(blob) + extra
+    struct.pack_into("<I", out, 0, len(out))
+    struct.pack_into("<I", out, head + 8, size + len(extra))
+    return bytes(out)
 
 
 # ── VPK ─────────────────────────────────────────────────────────────────────

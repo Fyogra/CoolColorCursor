@@ -151,16 +151,12 @@ def lang_dir() -> Optional[str]:
 
 def _data_offset(data: bytes) -> Tuple[int, int, int]:
     """(начало картинки, ширина, высота) для текстуры BGRA8888 без mip; ValueError — формат не тот."""
-    _fs, _hv, _ver, off, cnt = struct.unpack_from("<IHHII", data, 0)
-    pos = 8 + off
-    for _ in range(cnt):
-        rel, size = struct.unpack_from("<II", data, pos + 4)
-        if data[pos:pos + 4] == b"DATA":
-            w, h, _depth, fmt, mips = struct.unpack_from("<HHHBB", data, pos + 4 + rel + 20)
-            if fmt != 28 or mips != 1 or len(data) - w * h * 4 != pos + 4 + rel + size:
+    for name, _head, start, size in d.resource_blocks(data):
+        if name == b"DATA":
+            w, h, _depth, fmt, mips = struct.unpack_from("<HHHBB", data, start + 20)
+            if fmt != 28 or mips != 1 or len(data) - w * h * 4 != start + size:
                 raise ValueError("неожиданный формат текстуры")
-            return pos + 4 + rel + size, w, h
-        pos += 12
+            return start + size, w, h
     raise ValueError("нет блока DATA")
 
 
@@ -237,16 +233,25 @@ def _alpha(data: bytes):
     return w, h, data[start + 3::4]
 
 
+def _alpha_box(alpha: bytes, w: int, h: int):
+    """(x0, y0, x1, y1) того, что нарисовано, по байтам альфы; None — картинка пустая."""
+    rows = [y for y in range(h) if max(alpha[y * w:(y + 1) * w]) > 20]
+    if not rows:
+        return None
+    cols = [x for x in range(w) if max(alpha[x::w]) > 20]
+    return min(cols), rows[0], max(cols) + 1, rows[-1] + 1
+
+
 def _boxes(template: bytes, parts: int = 1):
     """Где в родной текстуре нарисовано: рамки непрозрачного. parts > 1 — столько звёзд в ряд (pipN):
     точки раскладываются на parts групп по горизонтали (звёзды могут касаться, поэтому не по связности)."""
     w, h, alpha = _alpha(template)
-    pts = [(i % w, i // w) for i, a in enumerate(alpha) if a > 20]
-    if not pts:
+    box = _alpha_box(alpha, w, h)
+    if box is None:
         return [(0, 0, w, h)]
     if parts == 1:
-        xs, ys = [x for x, _ in pts], [y for _, y in pts]
-        return [(min(xs), min(ys), max(xs) + 1, max(ys) + 1)]
+        return [box]
+    pts = [(i % w, i // w) for i, a in enumerate(alpha) if a > 20]
     lo, hi = min(x for x, _ in pts), max(x for x, _ in pts)
     centers = [lo + (hi - lo) * (k + 0.5) / parts for k in range(parts)]
     for _ in range(10):                                    # k-средних по x: центры звёзд
@@ -262,21 +267,17 @@ def _trim_box(img):
     """(x, y, ширина, высота) картинки без прозрачных полей (ищем по уменьшенной копии — у больших картинок
     миллионы точек); None — обрезать нечего."""
     from PyQt5.QtCore import Qt
+    from PyQt5.QtGui import QImage
     if not img.hasAlphaChannel():
         return None
-    small = img.scaled(256, 256, Qt.KeepAspectRatio, Qt.FastTransformation)
+    small = img.scaled(256, 256, Qt.KeepAspectRatio, Qt.FastTransformation).convertToFormat(QImage.Format_ARGB32)
     sw, sh = small.width(), small.height()
-    xs, ys = [], []
-    for y in range(sh):
-        for x in range(sw):
-            if (small.pixel(x, y) >> 24) > 20:
-                xs.append(x)
-                ys.append(y)
-    if not xs:
+    box = _alpha_box(small.constBits().asstring(sw * sh * 4)[3::4], sw, sh)
+    if box is None:
         return None
     kx, ky = img.width() / sw, img.height() / sh
-    x0, y0 = int(min(xs) * kx), int(min(ys) * ky)
-    return x0, y0, int((max(xs) + 1) * kx) - x0, int((max(ys) + 1) * ky) - y0
+    x0, y0 = int(box[0] * kx), int(box[1] * ky)
+    return x0, y0, int(box[2] * kx) - x0, int(box[3] * ky) - y0
 
 
 def _trim(img):
@@ -284,7 +285,7 @@ def _trim(img):
     return img.copy(*box) if box else img
 
 
-def _encode(template: bytes, img, parts: int = 1, trim: bool = True) -> bytes:
+def _encode(template: bytes, img, parts: int = 1, trim: bool = True, boxes=None) -> bytes:
     """Картинка в формате текстуры-образца: вписываем туда, где нарисована родная иконка, с сохранением
     пропорций. Для звёзд (parts = 1..5) одна картинка звезды ставится на место каждой родной звезды."""
     from PyQt5.QtCore import Qt
@@ -296,7 +297,7 @@ def _encode(template: bytes, img, parts: int = 1, trim: bool = True) -> bytes:
         img = _trim(img)
     p = QPainter(canvas)
     p.setRenderHint(QPainter.SmoothPixmapTransform)
-    for x0, y0, x1, y1 in _boxes(template, parts):
+    for x0, y0, x1, y1 in boxes or _boxes(template, parts):
         scaled = img.scaled(x1 - x0, y1 - y0, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         p.drawImage(x0 + (x1 - x0 - scaled.width()) // 2, y0 + (y1 - y0 - scaled.height()) // 2, scaled)
     p.end()
@@ -357,22 +358,10 @@ def _anim_script(real: str, show: str, set_name: str) -> Optional[str]:
     return ANIM_JS.replace("__ANIM__", json.dumps(table, separators=(",", ":"))) if table else None
 
 
-def _append_js(blob: bytes, js: str) -> bytes:
-    """Скрипт Dota с нашим кодом в конце блока DATA."""
-    _fs, _hv, _ver, off, cnt = struct.unpack_from("<IHHII", blob, 0)
-    pos, last = 8 + off, None
-    for _ in range(cnt):
-        rel, size = struct.unpack_from("<II", blob, pos + 4)
-        last = (blob[pos:pos + 4], pos + 4 + rel, size, pos)
-        pos += 12
-    name, start, size, head = last
-    if name != b"DATA" or start + size != len(blob):
-        raise ValueError("скрипт меню в игре изменился, анимации нужна правка сборщика")
-    data = js.encode("utf-8")
-    out = bytearray(blob) + data
-    struct.pack_into("<I", out, 0, len(out))
-    struct.pack_into("<I", out, head + 8, size + len(data))
-    return bytes(out)
+def _medal_files(slot: str) -> list:
+    """Иконки медали: сама и её маленькая версия."""
+    code = slot[4:]
+    return [slot, f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini"]
 
 
 def create_set(name: str) -> str:
@@ -402,17 +391,18 @@ def import_image(path: str, slot: str, set_name: str = MY_SET) -> Tuple[bool, st
     if slot.startswith("pip"):
         names = [(f"pip{n}", n) for n in range(1, MAX_STARS + 1)]
     else:
-        names = [(slot, 1), (f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini", 1)]
+        names = [(name, 1) for name in _medal_files(slot)]
     try:
         for name, parts in names:
-            data = _encode(_native(f"{ICON_DIR}{name}_psd.vtex_c"), img, parts)
+            data = _encode(_native(f"{ICON_DIR}{name}_psd.vtex_c"), img, parts, trim=not frames)   # кадры уже обрезаны
             _save_to_set(set_name, f"{name}_psd.vtex_c", data)
         if code:
             shutil.rmtree(os.path.join(SETS_DIR, set_name, ANIM_DIR, slot), ignore_errors=True)
         if frames:
             template = _native(f"{ICON_DIR}{slot}_psd.vtex_c")
+            boxes = _boxes(template)
             for k, (frame, _delay) in enumerate(frames):
-                _save_to_set(set_name, f"{ANIM_DIR}/{slot}/{k}_psd.vtex_c", _encode(template, frame, trim=False))
+                _save_to_set(set_name, f"{ANIM_DIR}/{slot}/{k}_psd.vtex_c", _encode(template, frame, trim=False, boxes=boxes))
             with open(os.path.join(SETS_DIR, set_name, ANIM_DIR, slot, "delays.json"), "w", encoding="utf-8") as f:
                 json.dump([delay for _frame, delay in frames], f)
     except (OSError, KeyError, ValueError, struct.error) as e:
@@ -423,7 +413,7 @@ def import_image(path: str, slot: str, set_name: str = MY_SET) -> Tuple[bool, st
 def reset_slot(set_name: str, slot: str) -> None:
     """Вернуть иконке slot в наборе родной вид."""
     code = slot[4:] if slot.startswith("rank") else ""
-    names = [slot] + ([f"mini/rank{code}" if len(code) == 1 else f"rank{code}_mini"] if code else [])
+    names = _medal_files(slot) if code else [slot]
     if code:
         shutil.rmtree(os.path.join(SETS_DIR, set_name, ANIM_DIR, slot), ignore_errors=True)
     for name in names:
@@ -472,7 +462,7 @@ def build_files(real: str, real_stars: int, show: str, show_stars: int, set_name
     if js:
         try:
             for script in ANIM_SCRIPTS:
-                files[script] = _append_js(_native(script), js)
+                files[script] = d.append_to_data(_native(script), js.encode("utf-8"))
         except (KeyError, ValueError, struct.error) as e:      # после патча Dota: ранги важнее анимации
             for script in ANIM_SCRIPTS:
                 files.pop(script, None)

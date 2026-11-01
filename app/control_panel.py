@@ -991,12 +991,6 @@ class ControlPanel(QWidget):
                 self._shop_busy = False
         threading.Thread(target=work, daemon=True).start()
 
-    @staticmethod
-    def _set_checked(action, checked: bool):
-        action.blockSignals(True)
-        action.setChecked(checked)
-        action.blockSignals(False)
-
     def _ask(self, title: str, text: str, ok: str) -> bool:
         dialog = InfoDialog(title, text, self, size=(460, 330), ok=ok, cancel="Отмена")
         dialog.move(self.geometry().center() - dialog.rect().center())
