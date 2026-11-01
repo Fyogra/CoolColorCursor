@@ -1,6 +1,6 @@
 name: release
 
-# exe собирается здесь, из кода тега релиза, а не на чьём-то компьютере: любой может сверить исходники и сборку
+# exe собирается здесь, из кода тега релиза (или указанного коммита), а не на чьём-то компьютере: любой может сверить исходники и сборку
 on:
   release:
     types: [published]
@@ -9,6 +9,9 @@ on:
       tag:
         description: "Тег релиза, к которому приложить exe (например v.2.0.7)"
         required: true
+      ref:
+        description: "Коммит для пересборки без нового релиза (пусто — код тега)"
+        required: false
 
 permissions:
   contents: write
@@ -23,7 +26,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.TAG }}
+          ref: ${{ inputs.ref || env.TAG }}
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -32,11 +35,13 @@ jobs:
       - name: Upload exe
         shell: bash
         run: |
+          src="тега $TAG"
+          [ -z "${{ inputs.ref }}" ] || src="коммита $(git rev-parse HEAD)"
           sha=$(sha256sum dist/CCC.exe | cut -d' ' -f1)
           echo "$sha  CCC.exe" > dist/CCC.exe.sha256
           gh release upload "$TAG" dist/CCC.exe dist/CCC.exe.sha256 --clobber
           body=$(gh release view "$TAG" --json body -q .body | sed '/^Собрано GitHub Actions/,$d')
           gh release edit "$TAG" --notes "$body
 
-          Собрано GitHub Actions из исходников тега $TAG: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
+          Собрано GitHub Actions из исходников $src: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID
           SHA-256 CCC.exe: \`$sha\`"
