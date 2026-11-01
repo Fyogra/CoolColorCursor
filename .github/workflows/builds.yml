@@ -2,7 +2,9 @@ name: builds
 
 on:
   schedule:
-    - cron: "17 3 * * *"   # раз в сутки
+    # Запуск заранее: GitHub стартует расписание с опозданием на несколько часов.
+    # Готовые данные ждут и публикуются в 00:00 МСК (21:00 UTC), см. шаг ожидания.
+    - cron: "17 15 * * *"
   workflow_dispatch:
 
 permissions:
@@ -11,7 +13,7 @@ permissions:
 jobs:
   export:
     runs-on: windows-latest
-    timeout-minutes: 60
+    timeout-minutes: 355   # предел GitHub — 6 часов на задачу
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -19,9 +21,21 @@ jobs:
           python-version: "3.12"
       - run: pip install PyQt5
       - run: python tools/export_builds.py
+        timeout-minutes: 60
         env:
           STRATZ_TOKEN: ${{ secrets.STRATZ_TOKEN }}
           PYTHONUTF8: "1"
+      - name: Wait for 00:00 MSK
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          # Если GitHub запустил уже после 21:00 UTC, публикуем сразу.
+          now=$(date -u +%s)
+          left=$(( now / 86400 * 86400 + 21 * 3600 - now ))
+          if [ "$(date -u +%-H)" -ge 12 ] && [ "$left" -gt 0 ]; then
+            echo "Ждём $left с"
+            sleep "$left"
+          fi
       - name: Commit data
         shell: bash
         run: |
@@ -29,4 +43,5 @@ jobs:
           git config user.email "builds-bot@users.noreply.github.com"
           git add data
           git diff --cached --quiet || git commit -m "Обновление сборок"
+          git pull --rebase
           git push
