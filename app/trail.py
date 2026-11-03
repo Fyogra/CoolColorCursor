@@ -154,12 +154,18 @@ def keep_on_top(widget: QWidget) -> None:
 #  Оверлей со шлейфом
 # ──────────────────────────────────────────────────────────────────────────────
 class MouseTrailOverlay(QWidget):
-    """Прозрачное «сквозное» окно на весь рабочий стол, в котором рисуется шлейф."""
+    """Прозрачное «сквозное» окно на весь рабочий стол, в котором рисуется шлейф.
+
+    Курсор снимается часто (не реже SAMPLE_HZ), а перерисовка идёт не чаще кадров монитора (и не чаще MAX_PAINT_HZ):
+    лишние кадры экран всё равно не покажет. Кривая между снимками считается один раз, когда снимок появился,
+    и хранится до угасания, а не пересчитывается на каждом кадре."""
 
     MAX_POINTS = 400             # жёсткий лимит снятых положений курсора
     MAX_INTERP_STEPS = 80        # лимит точек кривой между двумя соседними положениями
     SAMPLE_HZ = 120              # как часто снимать положение курсора — не реже, чем 120 раз в секунду
+    MAX_PAINT_HZ = 144           # перерисовка не чаще кадров монитора и не чаще этого
     CURVE_STEP = 2.0             # шаг точек кривой при рисовании, px
+    FADE_LEVELS = 256            # ступеней угасания цвета и толщины
     FREEZE_GAP = 0.1             # пауза между тиками (с), после которой считаем, что система «подвисла»
     FULL_REPAINT = False         # True — перерисовывать весь экран (если вдруг появятся артефакты)
     KEEP_HEAD_WHEN_IDLE = False  # True — как в старой версии: «точка» остаётся под неподвижным курсором
@@ -171,9 +177,11 @@ class MouseTrailOverlay(QWidget):
         self.color1 = QColor(color1)
         self.color2 = QColor(color2)
 
-        self.points = deque()  # снятые положения курсора: (QPointF, момент); кривая строится по ним при рисовании
+        self.points = deque()  # снятые положения курсора: (x, y, момент)
+        self._segs = deque()   # кривая от points[i] до points[i+1]: [(QPointF, момент), ...] без конечной точки
         self._last_pos = None
         self._last_tick = time.monotonic()
+        self._next_paint = 0.0
         self._dirty = QRect()  # где шлейф был нарисован в прошлый раз
         self.focus = GameFocus()  # рисовать только пока в фокусе Dota 2 (если включено)
 
@@ -186,7 +194,9 @@ class MouseTrailOverlay(QWidget):
         self.refresh_rate = self._detect_refresh_rate()
         # На 60 Гц курсор за кадр успевает пролететь десятки пикселей — снимаем его чаще кадров
         interval = max(1, int(1000 / max(self.refresh_rate, self.SAMPLE_HZ)))
-        log.info("Определена герцовка: %s Гц. Интервал таймера: %s мс", self.refresh_rate, interval)
+        self._frame = 1.0 / min(self.refresh_rate, self.MAX_PAINT_HZ)
+        log.info("Определена герцовка: %s Гц. Интервал таймера: %s мс, кадр %.1f мс",
+                 self.refresh_rate, interval, self._frame * 1000)
 
         self.timer = QTimer(self)
         self.timer.setTimerType(Qt.PreciseTimer)
@@ -217,7 +227,7 @@ class MouseTrailOverlay(QWidget):
     # ── управление ──────────────────────────────────────────────────────────
     def set_colors(self, c1: QColor, c2: QColor):
         self.color1, self.color2 = QColor(c1), QColor(c2)
-        self.points.clear()
+        self._clear()
         self._dirty = QRect()
         self.update()
 
@@ -227,12 +237,48 @@ class MouseTrailOverlay(QWidget):
         self.deleteLater()
 
     # ── логика шлейфа ───────────────────────────────────────────────────────
+    def _clear(self):
+        self.points.clear()
+        self._segs.clear()
+
+    def _pop_oldest(self):
+        self.points.popleft()
+        if self._segs:
+            self._segs.popleft()
+
+    def _segment(self, i: int):
+        """Кусок сплайна Катмулла–Рома от points[i] до points[i+1] с моментом времени в каждой точке:
+        форма без углов, а цвет с толщиной угасают плавно, а не ступеньками по кадрам."""
+        pts = self.points
+        x1, y1, t1 = pts[i]
+        x2, y2, t2 = pts[i + 1]
+        x0, y0 = (pts[i - 1][0], pts[i - 1][1]) if i > 0 else (x1, y1)
+        x3, y3 = (pts[i + 2][0], pts[i + 2][1]) if i + 2 < len(pts) else (x2, y2)
+        steps = max(1, min(self.MAX_INTERP_STEPS, int(math.hypot(x2 - x1, y2 - y1) / self.CURVE_STEP)))
+        bx, cx, dx = x2 - x0, 2 * x0 - 5 * x1 + 4 * x2 - x3, 3 * x1 - x0 - 3 * x2 + x3
+        by, cy, dy = y2 - y0, 2 * y0 - 5 * y1 + 4 * y2 - y3, 3 * y1 - y0 - 3 * y2 + y3
+        out = []
+        for k in range(steps):
+            u = k / steps
+            u2, u3 = u * u, u * u * u
+            out.append((QPointF(0.5 * (2 * x1 + bx * u + cx * u2 + dx * u3),
+                                0.5 * (2 * y1 + by * u + cy * u2 + dy * u3)), t1 + (t2 - t1) * u))
+        return out
+
+    def _push(self, x: float, y: float, now: float):
+        self.points.append((x, y, now))
+        n = len(self.points)
+        if n >= 3:                 # у предыдущего куска появилась следующая точка — его изгиб уточняется
+            self._segs[-1] = self._segment(n - 3)
+        if n >= 2:
+            self._segs.append(self._segment(n - 2))
+
     def _tick(self):
         now = time.monotonic()
         if not self.focus(now):
             self._last_tick = now
             if self.points:
-                self.points.clear()
+                self._clear()
                 self._invalidate()
             return
         cur = QPointF(self.mapFromGlobal(QCursor.pos()))
@@ -241,29 +287,31 @@ class MouseTrailOverlay(QWidget):
         if now - self._last_tick > self.FREEZE_GAP:
             self._last_tick = now
             self._last_pos = cur
-            self.points.clear()
+            self._clear()
             self._invalidate()
             return
         self._last_tick = now
 
-        while self.points and now - self.points[0][1] > self.fade_time:
-            self.points.popleft()
+        while self.points and now - self.points[0][2] > self.fade_time:
+            self._pop_oldest()
 
         last = self._last_pos
         moved = last is None or cur != last
         if moved or self.KEEP_HEAD_WHEN_IDLE:
-            self.points.append((cur, now))
+            self._push(cur.x(), cur.y(), now)
         self._last_pos = cur
 
         while len(self.points) > self.MAX_POINTS:
-            self.points.popleft()
-        self._invalidate()
+            self._pop_oldest()
+        if now >= self._next_paint:
+            self._next_paint = max(self._next_paint + self._frame, now + self._frame * 0.5)
+            self._invalidate()
 
     def _bounds(self) -> QRect:
         if not self.points:
             return QRect()
-        xs = [p.x() for p, _ in self.points]
-        ys = [p.y() for p, _ in self.points]
+        xs = [p[0] for p in self.points]
+        ys = [p[1] for p in self.points]
         margin = int(self.max_width) + 12      # кривая может чуть выйти за снятые точки на поворотах
         left, top = int(min(xs)) - margin, int(min(ys)) - margin
         return QRect(left, top, int(max(xs)) + margin + 1 - left, int(max(ys)) + margin + 1 - top)
@@ -290,56 +338,36 @@ class MouseTrailOverlay(QWidget):
         now = time.monotonic()
         self._paint_trail(p, now)
 
-    def _curve(self):
-        """Плавная кривая через снятые положения курсора (сплайн Катмулла–Рома) с моментом времени в каждой
-        точке: так и форма без углов, и цвет с толщиной угасают плавно, а не ступеньками по кадрам."""
-        raw = list(self.points)
-        n = len(raw)
-        out = []
-        for i in range(n - 1):
-            p1, t1 = raw[i]
-            p2, t2 = raw[i + 1]
-            p0 = raw[i - 1][0] if i > 0 else p1
-            p3 = raw[i + 2][0] if i + 2 < n else p2
-            steps = max(1, min(self.MAX_INTERP_STEPS,
-                               int(math.hypot(p2.x() - p1.x(), p2.y() - p1.y()) / self.CURVE_STEP)))
-            for k in range(steps):
-                u = k / steps
-                u2, u3 = u * u, u * u * u
-                x = 0.5 * (2 * p1.x() + (p2.x() - p0.x()) * u + (2 * p0.x() - 5 * p1.x() + 4 * p2.x() - p3.x()) * u2
-                           + (3 * p1.x() - p0.x() - 3 * p2.x() + p3.x()) * u3)
-                y = 0.5 * (2 * p1.y() + (p2.y() - p0.y()) * u + (2 * p0.y() - 5 * p1.y() + 4 * p2.y() - p3.y()) * u2
-                           + (3 * p1.y() - p0.y() - 3 * p2.y() + p3.y()) * u3)
-                out.append((QPointF(x, y), t1 + (t2 - t1) * u))
-        if raw:
-            out.append(raw[-1])
-        return out
-
     def _paint_trail(self, p: QPainter, now: float) -> None:
-        points = self._curve()
-        if len(points) < 2:
+        if len(self.points) < 2:
             return
+        x, y, t = self.points[-1]
+        points = [pt for seg in self._segs for pt in seg]
+        points.append((QPointF(x, y), t))
         r1, g1, b1 = self.color1.red(), self.color1.green(), self.color1.blue()
         r2, g2, b2 = self.color2.red(), self.color2.green(), self.color2.blue()
+        inv, width, levels = 1.0 / self.fade_time, self.max_width, self.FADE_LEVELS
 
         pen = QPen()
         pen.setCapStyle(Qt.RoundCap)
         pen.setJoinStyle(Qt.RoundJoin)
         color = QColor()
-
+        draw, set_pen = p.drawLine, p.setPen
+        key = -1
+        # Перо меняется, только когда угасание дошло до следующей ступени (их FADE_LEVELS — глазу не видно),
+        # а не на каждом кусочке. Кусочки рисуются по одному: так полупрозрачные перекрытия те же, что и раньше
         for i in range(len(points) - 1):
             p1, t1 = points[i]
-            p2 = points[i + 1][0]
-
-            progress = max(0.0, min(1.0, 1.0 - (now - t1) / self.fade_time))
+            progress = 1.0 - (now - t1) * inv
             if progress < 0.01:
                 continue
-
-            color.setRgb(int(r2 + (r1 - r2) * progress),
-                         int(g2 + (g1 - g2) * progress),
-                         int(b2 + (b1 - b2) * progress),
-                         int(255 * progress ** 1.5))
-            pen.setColor(color)
-            pen.setWidthF(max(1.0, self.max_width * progress))
-            p.setPen(pen)
-            p.drawLine(p1, p2)
+            k = levels if progress >= 1.0 else int(progress * levels)
+            if k != key:
+                key = k
+                q = k / levels
+                color.setRgb(int(r2 + (r1 - r2) * q), int(g2 + (g1 - g2) * q), int(b2 + (b1 - b2) * q),
+                             int(255 * q ** 1.5))
+                pen.setColor(color)
+                pen.setWidthF(max(1.0, width * q))
+                set_pen(pen)
+            draw(p1, points[i + 1][0])

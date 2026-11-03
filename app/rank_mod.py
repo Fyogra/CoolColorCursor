@@ -37,13 +37,30 @@ MAX_FRAMES = 24
 MIN_DELAY = 40                                                   # мс: быстрее кадры всё равно не успеют смениться
 ANIM_JS = r"""
 ;(function () {
+    // Игра загружает эти скрипты в нескольких копиях и может загружать снова. Работает одна копия на интерфейс —
+    // «хозяин»: он отмечается в атрибутах корневой панели; остальные раз в секунду проверяют, жив ли он, и если
+    // хозяин пропал больше чем на 1.5 с, его место занимает следующая. Копия, чья панель удалена, останавливается
     var ANIM = __ANIM__, items = [], ticks = 0, n;
     for (n in ANIM) {
         ANIM[n].t = 0;
         for (var i = 0; i < ANIM[n].d.length; i++) ANIM[n].t += ANIM[n].d[i];
     }
-    var root = $.GetContextPanel();
+    var ctx = $.GetContextPanel();
+    var root = ctx;
     while (root.GetParent()) root = root.GetParent();
+    var me = String(Math.random()).slice(2) + String(Date.now() % 100000);
+    var OWNER = "ccc_anim_owner", BEAT = "ccc_anim_beat", BOX = "CCCAnimPreload";
+    function own(now) {
+        var cur = root.GetAttributeString(OWNER, "");
+        if (cur !== me && cur !== "" && now - Number(root.GetAttributeString(BEAT, "0")) < 1500) return false;
+        if (cur !== me) {
+            $.Msg("CCC rank anim: owner " + me);
+            ticks = 0;
+        }
+        root.SetAttributeString(OWNER, me);
+        root.SetAttributeString(BEAT, String(now));
+        return true;
+    }
     function rankOf(p) {
         for (var q = p; q; q = q.GetParent()) {
             if (q.BHasClass("LeaderboardTop1") || q.BHasClass("LeaderboardTop10")) return "8c";
@@ -58,16 +75,30 @@ ANIM_JS = r"""
         return 'url("s2r://panorama/images/rank_tier_icons/anim/rank' + a.m + "/" + k + '_psd.vtex")';
     }
     function preload(a) {
-        // игра выгружает картинку, которую никто не показывает: без этого кадры грузились бы заново и медаль мигала
+        // игра выгружает картинку, которую никто не показывает: без этого кадры грузились бы заново и медаль мигала.
+        // Скрытые панели с кадрами создаются один раз на интерфейс, в общей коробке, и переживают смену хозяина
+        var box = root.FindChild(BOX);
+        if (!box) {
+            box = $.CreatePanel("Panel", root, BOX);
+            box.hittest = false;
+            box.style.width = "1px";
+            box.style.height = "1px";
+            box.style.opacity = "0.01";
+        }
+        var done = box.GetAttributeString("done", ",");
+        if (done.indexOf("," + a.m + ",") >= 0) {
+            a.ready = 0;
+            return;
+        }
         a.ready = ticks + 60;
         for (var k = 0; k < a.d.length; k++) {
-            var h = $.CreatePanel("Panel", root, "");
+            var h = $.CreatePanel("Panel", box, "");
             h.hittest = false;
             h.style.width = "1px";
             h.style.height = "1px";
-            h.style.opacity = "0.01";
             h.style.backgroundImage = url(a, k);
         }
+        box.SetAttributeString("done", done + a.m + ",");
     }
     function refresh() {
         items = [];
@@ -79,14 +110,17 @@ ANIM_JS = r"""
             if (ANIM[r] && p.FindChildrenWithClassTraverse("RankTierImage").length) {
                 // медаль из двух вложенных панелей (окно рангов): непрозрачная гифка торчала бы из-под внутренней
                 p.style.backgroundImage = "none";
-                p.cccAnim = true;
+                p.SetAttributeString("ccc_anim", "1");
                 continue;
             }
             if (ANIM[r]) {
                 if (ANIM[r].ready === undefined) preload(ANIM[r]);
                 items.push({ p: p, n: r, k: -1 });
             }
-            else if (p.cccAnim) { p.style.backgroundImage = null; p.cccAnim = false; }
+            else if (p.GetAttributeString("ccc_anim", "") === "1") {
+                p.style.backgroundImage = null;
+                p.SetAttributeString("ccc_anim", "");
+            }
         }
     }
     function frameOf(a, now) {
@@ -98,16 +132,22 @@ ANIM_JS = r"""
         return 0;
     }
     function tick() {
+        if (!ctx.IsValid()) return;
+        var now = Date.now();
         try {
+            if (!own(now)) {
+                items = [];
+                $.Schedule(1.0, tick);
+                return;
+            }
             if (ticks++ % 20 === 0) refresh();
-            var now = Date.now();
             for (var i = 0; i < items.length; i++) {
                 var it = items[i], a = ANIM[it.n];
                 if (!it.p.IsValid() || ticks < a.ready) continue;
                 var k = frameOf(a, now);
                 if (k === it.k) continue;
                 it.k = k;
-                it.p.cccAnim = true;
+                it.p.SetAttributeString("ccc_anim", "1");
                 it.p.style.backgroundImage = url(a, k);
             }
         } catch (e) { $.Msg("CCC rank anim: " + e); }

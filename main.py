@@ -16,10 +16,12 @@ CCC | CoolColorCursor
 from __future__ import annotations
 
 import sys
+import time
 from PyQt5.QtCore import QSharedMemory
 from PyQt5.QtWidgets import QApplication
 from app.config import APP_NAME, log, setup_logging
 from app.control_panel import ControlPanel
+from app.updater import UPDATED_ARG
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -32,9 +34,14 @@ def main() -> int:
     guard = QSharedMemory(f"{APP_NAME}_single_instance")
     if guard.attach():
         guard.detach()  # на Unix чистит «осиротевший» сегмент после падения
-    if not guard.create(1):
-        log.warning("Приложение уже запущено — выход")
-        return 0
+    # После обновления новый exe стартует, пока старый ещё закрывается, — ждём его до 20 секунд
+    tries = 80 if UPDATED_ARG in sys.argv else 1
+    while not guard.create(1):
+        tries -= 1
+        if tries <= 0:
+            log.warning("Приложение уже запущено — выход")
+            return 0
+        time.sleep(0.25)
 
     panel = ControlPanel()
     panel.show()

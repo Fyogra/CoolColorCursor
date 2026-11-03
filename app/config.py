@@ -201,6 +201,8 @@ class Settings:
         self.builds_role = 0         # вкладка позиции в окне сборок: 0..4
         self.builds_hero = 0         # последний герой в окне сборок
         self.history = []  # [(QColor, QColor), ...], свежие — в начале
+        self.last_version = ""       # версия, запущенная в прошлый раз: после обновления показываем, что нового
+        self.existed = False         # конфиг уже был (не первый запуск программы)
 
     @classmethod
     def load(cls, path: str) -> "Settings":
@@ -216,6 +218,8 @@ class Settings:
             log.error("Ошибка загрузки конфигурации: %s", e)
             return s
 
+        s.existed = True
+        s.last_version = str(raw.get("last_version", ""))
         s.colors = [_color(raw.get("color1"), DEFAULT_C1), _color(raw.get("color2"), DEFAULT_C2)]
         s.max_width = _clamp(raw.get("max_width", 12), 2, 50, 12)
         s.fade_ms = _clamp(raw.get("fade_time", 0.4), 100, 1500, 400, scale=1000)
@@ -230,7 +234,8 @@ class Settings:
         s.lotus_alert = _clamp(raw.get("lotus_alert", 5), 0, 30, 5)
         s.hud_hold_alt = bool(raw.get("hud_hold_alt", True))
         s.only_in_dota = bool(raw.get("only_in_dota", True))
-        mode = raw.get("trail_mode", "dota")
+        # До v.2.0.8 след при запуске был выключен: тем, кто обновился с тех версий, он сам не включается
+        mode = raw.get("trail_mode", "off")
         s.trail_mode = mode if mode in ("dota", "all", "off") else "dota"
         s.ingame_marker = bool(raw.get("ingame_marker", False))
         s.ingame_petals = str(raw.get("ingame_petals", s.ingame_petals))
@@ -302,6 +307,7 @@ class Settings:
             "builds_role": self.builds_role,
             "builds_hero": self.builds_hero,
             "history": [[a.name(), b.name()] for a, b in self.history],
+            "last_version": self.last_version,
         }
         tmp = path + ".tmp"
         try:

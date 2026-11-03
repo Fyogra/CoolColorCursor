@@ -30,6 +30,13 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Check version
+        shell: bash
+        run: |
+          # версия в программе должна совпадать с тегом, иначе автообновление будет предлагать её снова и снова
+          [ -f app/version.py ] || exit 0
+          v=$(sed -n 's/^VERSION = "\(.*\)"/\1/p' app/version.py)
+          [ "v.$v" = "$TAG" ] || { echo "app/version.py ($v) не совпадает с тегом $TAG"; exit 1; }
       - run: pip install PyQt5==5.15.11 pyinstaller==6.22.3   # версии те же, что у локальной сборки
       - run: pyinstaller --noconfirm CCC.spec
       - name: Upload exe

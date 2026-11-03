@@ -10,7 +10,7 @@ from PyQt5.QtCore import QTimer, Qt, pyqtSignal
 from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import QActionGroup, QApplication, QDialog, QFrame, QHBoxLayout, QLabel, QMenu, QPushButton, QSystemTrayIcon, QVBoxLayout, QWidget
 from typing import Optional
-from app import dota_mod, ingame_marker, rank_mod, shop_mod
+from app import dota_mod, ingame_marker, rank_mod, shop_mod, updater
 from app.rank_window import RankDialog
 from app.egg import EggDialog, EggTrigger
 from app.marker_window import MarkerDialog
@@ -21,7 +21,9 @@ from app.gsi import GSIServer, LIVE, OFFLINE, PREGAME, Snapshot, format_clock, i
 from app.hud import LauncherIcon, STATUS_TEXT, TimerHUD
 from app.icon import app_icon
 from app.sound import AlertTracker, SoundDialog, VK_ALT, ensure_bell, is_key_down, play_bell
-from app.trail import GameFocus, MouseTrailOverlay, close_window, dota_window, keep_on_top
+from app.trail import GAME_EXES, GameFocus, MouseTrailOverlay, close_window, dota_window, foreground_exe, keep_on_top
+from app.update_window import NewsDialog, UpdateDialog
+from app.version import VERSION
 from app.ui_common import AutostartDialog, ClickSlider, ColorPickerWindow, DragHeader, InfoDialog, SLIDER_STYLE, StarryBackground, caption, gradient_button_style, make_button, outline_button_style, readable_text_color
 
 
@@ -49,6 +51,7 @@ def daily_presets(day: date, count: int = 5) -> list:
 class ControlPanel(QWidget):
     WIDTH, HEIGHT = 380, 676
     shopModeDone = pyqtSignal(str, bool, str)    # режим сборок, получилось ли, причина — из фонового потока
+    updateChecked = pyqtSignal(object, object)   # новая версия (или None), все релизы (None — нет сети)
 
     QUICK_COLORS = ("#ff0055", "#ff6600", "#ffcc00", "#00ffc8", "#00ccff", "#0055ff", "#9d00ff", "#ffffff")
     def __init__(self):
@@ -124,6 +127,13 @@ class ControlPanel(QWidget):
         except Exception as e:  # noqa: BLE001 — не критично
             log.warning("Проверка GSI-конфига не удалась: %s", e)
         QTimer.singleShot(300, self._maybe_ask_autostart)
+
+        log.info("Версия %s", VERSION)
+        self._cleanup_old_version()
+        self._pending_dialogs = []
+        self.updateChecked.connect(self._on_update_checked)
+        threading.Thread(target=lambda: self.updateChecked.emit(*updater.check()), name="update-check",
+                         daemon=True).start()
 
     # ── сохранение ──────────────────────────────────────────────────────────
     def schedule_save(self):
@@ -469,6 +479,50 @@ class ControlPanel(QWidget):
         event.accept()
         if not self._quitting:  # Alt+F4 завершает программу полностью, в трей прячет только ✕
             self.quit_app()
+
+    # ── обновления ──────────────────────────────────────────────────────────
+    def _on_update_checked(self, best, releases):
+        s = self.settings
+        if releases is not None:
+            news = updater.news(releases, s.last_version, s.existed)
+            if news:
+                self._pending_dialogs.append(lambda: NewsDialog(news))
+        # Без сети после обновления версию не запоминаем — «что нового» покажем при следующем запуске
+        if (releases is not None or not s.existed) and s.last_version != VERSION:
+            s.last_version = VERSION
+            self.schedule_save()
+        if best is not None:
+            self._pending_dialogs.append(lambda: UpdateDialog(best))
+        self._show_pending_dialogs()
+
+    def _cleanup_old_version(self, tries: int = 10):
+        if not updater.cleanup_old() and tries > 1:     # старый exe ещё закрывается — попробуем позже
+            QTimer.singleShot(5000, lambda: self._cleanup_old_version(tries - 1))
+
+    def _show_pending_dialogs(self):
+        """Окна обновления по очереди; пока активна Dota 2 — ждём, чтобы не выскакивать поверх игры."""
+        if self._quitting or not self._pending_dialogs:
+            return
+        if foreground_exe() in GAME_EXES:
+            QTimer.singleShot(3000, self._show_pending_dialogs)
+            return
+        dialog = self._pending_dialogs.pop(0)()
+        log.info("Окно обновления: %s", type(dialog).__name__)
+        screen = QApplication.primaryScreen().availableGeometry()
+        dialog.move(screen.center() - dialog.rect().center())
+        result = dialog.exec_()
+        log.info("Окно обновления закрыто: %s", "да" if result else "нет")
+        dialog.deleteLater()
+        if isinstance(dialog, UpdateDialog) and dialog.installed:
+            self._pending_dialogs.clear()
+            try:
+                updater.restart()
+            except OSError as e:
+                log.error("Не удалось запустить новую версию: %s", e)
+                InfoDialog("ОБНОВЛЕНИЕ", "Новая версия установлена. Запустите программу заново.").exec_()
+            self.quit_app()
+            return
+        self._show_pending_dialogs()
 
     # ── автозапуск ──────────────────────────────────────────────────────────
     def _set_autostart_check(self, checked: bool):
