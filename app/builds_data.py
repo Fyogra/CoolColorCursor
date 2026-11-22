@@ -50,6 +50,14 @@ SKILL_LEN = 18
 SKILL_MIN_GAMES = 8           # меньше настоящих цепочек на позиции — берём цепочки героя по всем позициям
 SKILL_DAYS_WIDER = 180        # герой редкий в про-сцене — цепочки за полгода
 
+# 7.42. Пока новых предметов нет в статистике Stratz, показываем их отдельной строкой по матчам OpenDota
+PATCH_NAME = "7.42"
+PATCH_TIME = 1794988800
+NEW_ITEMS = ("bloodslinger", "caduceus", "ristuls_devotion", "berserkers_sabatons", "skypiercer", "starforge")
+REMOVED_ITEMS = frozenset({"javelin", "helm_of_the_overlord", "angels_demise"})
+FRESH_MIN = 3         # столько матчей с покупкой у героя, чтобы показать ему новый предмет
+FRESH_SHOWN_PCT = 6   # с такой доли на основной позиции предмет уже виден в обычной сборке
+
 # Расходники и прочее, что не показываем после старта
 NOT_AN_ITEM_LATER = frozenset({
     "tango", "flask", "clarity", "enchanted_mango", "faerie_fire", "blood_grenade", "tpscroll",
@@ -60,6 +68,10 @@ NOT_AN_ITEM_LATER = frozenset({
 
 class BuildsError(Exception):
     """Понятная пользователю ошибка загрузки данных."""
+
+
+class NoGamesError(BuildsError):
+    """Stratz ответил, но игр нет (новая неделя или патч): повторять запрос бесполезно."""
 
 
 def http_get(url: str, timeout: float = 25) -> bytes:
@@ -478,6 +490,53 @@ def explorer_sql(hero_id: int, since: int, limit: int) -> str:
     )
 
 
+def get_patient(url: str):
+    """OpenDota после патча отвечает по минуте: долгий таймаут и вторая попытка."""
+    try:
+        return http_get_json(url, timeout=90)
+    except BuildsError:
+        time.sleep(10)
+        return http_get_json(url, timeout=90)
+
+
+def new_item_games() -> Dict[int, Dict[str, int]]:
+    """{герой: {новый предмет: матчей с покупкой}} после патча: публичные и про-матчи OpenDota.
+    Выборки пересекаются, поэтому берём большую, а не сумму."""
+    out: Dict[int, Counter] = {}
+    for key in NEW_ITEMS:
+        games: Counter = Counter()
+        for row in get_patient(f"{OPENDOTA_API}/scenarios/itemTimings?item={key}") or []:
+            games[int(row["hero_id"])] += int(row["games"])
+        for hero, n in games.items():
+            out.setdefault(hero, Counter())[key] = n
+    keys = ",".join(f"'{k}'" for k in NEW_ITEMS)
+    sql = ("SELECT x.item, p.hero_id, count(DISTINCT p.match_id) AS n FROM player_matches p "
+           "JOIN matches m ON m.match_id = p.match_id, "
+           "LATERAL (SELECT e->>'key' AS item FROM unnest(p.purchase_log) e) x "
+           f"WHERE m.start_time >= {PATCH_TIME} AND x.item IN ({keys}) GROUP BY 1, 2")
+    resp = get_patient(f"{OPENDOTA_API}/explorer?" + urllib.parse.urlencode({"sql": sql}))
+    if not isinstance(resp, dict) or resp.get("err") or not isinstance(resp.get("rows"), list):
+        raise BuildsError("explorer: нет данных о новых предметах")
+    for row in resp["rows"]:
+        games = out.setdefault(int(row["hero_id"]), Counter())
+        games[row["item"]] = max(games[row["item"]], int(row["n"]))
+    return {hero: dict(games) for hero, games in out.items()}
+
+
+def apply_patch_items(data: dict, games: Optional[Dict[int, Dict[str, int]]]) -> None:
+    """Убирает удалённые предметы и ставит строку новых; games=None — строку оставляем прежней."""
+    positions = list((data.get("positions") or {}).values())
+    for pos in positions:
+        for phase, row in pos["phases"].items():
+            pos["phases"][phase] = [it for it in row if it["key"] not in REMOVED_ITEMS]
+    main = max(positions, key=lambda p: p.get("games", 0), default={"phases": {}})
+    shown = {it["key"] for row in main["phases"].values() for it in row if it.get("pct", 0) >= FRESH_SHOWN_PCT}
+    if games is not None:
+        mine = games.get(int(data["hero_id"]), {})
+        data["fresh"] = [{"key": k, "games": n} for k, n in sorted(mine.items(), key=lambda kv: (-kv[1], kv[0]))
+                         if n >= FRESH_MIN and k not in shown]
+
+
 # ── Stratz: сборки хай-рейтинговых лобби (OpenDota разбирает только про-матчи) ──
 def stratz_token() -> str:
     token = "".join(os.environ.get("STRATZ_TOKEN", "").split())
@@ -532,6 +591,8 @@ def stratz_hero_stats(query: str, token: str, timeout: float = 90) -> dict:
         errors = body.get("errors") if isinstance(body, dict) else None
         msg = str(errors[0].get("message", "")) if isinstance(errors, list) and errors and isinstance(errors[0], dict) else ""
         raise BuildsError("Stratz: " + (msg[:120] or "нет данных"))
+    if body.get("errors") and any(v is None for v in stats.values()):
+        raise BuildsError("Stratz: ответ с ошибкой, часть данных не пришла")
     return stats
 
 
@@ -647,7 +708,7 @@ class BuildsService:
 
     def builds(self, hero_id: int, force: bool = False) -> dict:
         consts = self.constants()
-        name = f"builds4_{int(hero_id)}.json"
+        name = f"builds5_{int(hero_id)}.json"
         cached = cache_load(name)
         if cached and not force and 0 <= cached[1] < BUILDS_TTL:
             return normalize_skills(dict(cached[0], age=cached[1]))
@@ -708,7 +769,7 @@ class BuildsService:
                 if cur["games"] < b["games"] and not any(cur["phases"][ph] for ph in later):
                     built[p], wide = b, True
         if not any(b["item_games"] for b in built.values()):
-            raise BuildsError("Stratz: по герою нет данных")
+            raise NoGamesError("Stratz: по герою нет данных")
         # Прокачка только из настоящих цепочек матчей OpenDota (Stratz цепочек не отдаёт)
         for pos, skills in self.real_skills(hero_id, consts).items():
             built[pos]["skills"] = skills

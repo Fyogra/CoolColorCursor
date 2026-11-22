@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QApplication, QButtonGroup, QFrame, QGridLayout, QHB
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from typing import Dict, Optional, Tuple
-from app.builds_data import BUILDS_DAYS, BuildsService, DotaConstants, ITEMS_PER_PHASE, PHASES, POSITIONS, POSITION_NAMES, _is_int, fetch_image_bytes, format_age, is_talent
+from app.builds_data import BUILDS_DAYS, BuildsService, DotaConstants, ITEMS_PER_PHASE, PATCH_NAME, PHASES, POSITIONS, POSITION_NAMES, _is_int, fetch_image_bytes, format_age, is_talent
 from app.config import APP_TITLE, DANGER, DIM, FONT, FONT_SYMBOL, IS_WINDOWS, MUTED, TEXT, log
 from app.sound import is_key_down
 from app.trail import keep_on_top
@@ -464,6 +464,16 @@ class BuildsWindow(QWidget):
             cl.addWidget(holder)
             self.phase_grids[phase] = grid
 
+        self.fresh_title = caption(f"НОВОЕ В {PATCH_NAME}", size=10, color=SHOP_GOLD)
+        self.fresh_holder = QWidget()
+        self.fresh_grid = QGridLayout(self.fresh_holder)
+        self.fresh_grid.setHorizontalSpacing(6)
+        self.fresh_grid.setVerticalSpacing(2)
+        cl.addWidget(self.fresh_title)
+        cl.addWidget(self.fresh_holder)
+        self.fresh_title.hide()
+        self.fresh_holder.hide()
+
         cl.addWidget(caption("ПРОКАЧКА СПОСОБНОСТЕЙ", size=10, color=SHOP_GOLD))
         self.skill_grid = QGridLayout()
         self.skill_grid.setHorizontalSpacing(3)
@@ -675,6 +685,13 @@ class BuildsWindow(QWidget):
             for i, it in enumerate(items[:ITEMS_PER_PHASE]):
                 grid.addWidget(self._item_cell(it.get("key", ""), it.get("pct", 0)), i // 5, i % 5)
 
+        _clear_layout(self.fresh_grid)
+        fresh = ((self.data or {}).get("fresh") or []) if pos else []
+        for i, it in enumerate(fresh):
+            self.fresh_grid.addWidget(self._item_cell(it.get("key", ""), 0, it.get("games", 0)), i // 5, i % 5)
+        self.fresh_title.setVisible(bool(fresh))
+        self.fresh_holder.setVisible(bool(fresh))
+
         _clear_layout(self.skill_grid)
         skills = (pos or {}).get("skills") or {}
         order = skills.get("order") or []
@@ -696,7 +713,8 @@ class BuildsWindow(QWidget):
         elif self.data:
             self.talents_grid.addWidget(caption("Данных о талантах нет (нужны данные Stratz).", size=9, color=DIM), 0, 0)
 
-    def _item_cell(self, key: str, pct: int) -> QWidget:
+    def _item_cell(self, key: str, pct: int, games: int = 0) -> QWidget:
+        note = f"{games} игр" if games else f"{pct}%"
         cell = QWidget()
         v = QVBoxLayout(cell)
         v.setContentsMargins(0, 0, 0, 0)
@@ -704,12 +722,12 @@ class BuildsWindow(QWidget):
         tile = IconTile(self.ITEM_W, self.ITEM_H, key[:4].upper())
         tile.setCursor(Qt.PointingHandCursor)
         if self.consts:
-            tile.setToolTip(f"{self.consts.item_name(key)} — {pct}%")
+            tile.setToolTip(f"{self.consts.item_name(key)} — {note}")
             self.images.request(self.consts.item_img(key), tile.set_pixmap)
         tile.clicked.connect(lambda k=key: self._copy_item(k))
-        lbl = QLabel(f"{pct}%")
+        lbl = QLabel(note)
         lbl.setAlignment(Qt.AlignCenter)
-        lbl.setStyleSheet(f"color: {pct_color(pct)}; font-size: 9px; font-weight: bold; background: transparent;")
+        lbl.setStyleSheet(f"color: {'#9fd4ff' if games else pct_color(pct)}; font-size: 9px; font-weight: bold; background: transparent;")
         v.addWidget(tile, 0, Qt.AlignHCenter)
         v.addWidget(lbl)
         return cell

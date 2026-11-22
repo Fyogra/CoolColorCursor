@@ -105,6 +105,7 @@ class ControlPanel(QWidget):
             log.info("Паки не перенесены: %s", e)
         self._ensure_ingame_marker()
         self._ensure_rank_mod()
+        threading.Thread(target=shop_mod.refresh_abilities, name="abilities", daemon=True).start()
         self.shopModeDone.connect(self._on_builds_mode_done)
         self._shop_timer = QTimer(self)
         self._shop_timer.timeout.connect(self._refresh_shop_pack)

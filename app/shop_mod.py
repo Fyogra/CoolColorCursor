@@ -11,7 +11,7 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Tuple
 from app import dota_mod as d
-from app.builds_data import CACHE_DIR, PUBLISHED_URL, BuildsService
+from app.builds_data import CACHE_DIR, PATCH_NAME, PUBLISHED_URL, BuildsService
 from app.config import DATA_DIR, log
 from app import ability_info, skill_order
 from app.skill_order import normalize, _info as so_info
@@ -19,6 +19,7 @@ from app.skill_order import normalize, _info as so_info
 JS = "panorama/scripts/hud/dota_hud_shop.vjs_c"
 STATE_FILE = os.path.join(DATA_DIR, "shop_state.json")
 REFRESH_SECONDS = 20 * 3600
+FORMAT = 2                       # поднять, если новая версия должна сразу пересобрать пак
 PHASES = ("start", "early", "mid", "late")
 LIMITS = {"start": 15, "early": 15, "mid": 15, "late": 15}
 RARE_PCT = 6          # предметы реже этого % отбрасываем (но не меньше двух в стадии)
@@ -96,9 +97,17 @@ def collect():
                     talents.append([10 + 5 * k, tl(l), tl(r), 0, 0, 0])
             if any(phases):
                 positions[pos] = (pd.get("games", 0), phases, skills, talents)
+        fresh = []                      # новые предметы патча: [номер, матчей с покупкой]
+        for it in b.get("fresh") or []:
+            key = it.get("key")
+            if key in items:
+                if key not in index:
+                    index[key] = len(table)
+                    table.append(key)
+                fresh.append([index[key], it.get("games", 0)])
         if positions:
             order = sorted(positions, key=lambda p: -positions[p][0])
-            data[hid] = {"o": [int(p) for p in order], "p": {p: positions[p][1] for p in order},
+            data[hid] = {"f": fresh, "o": [int(p) for p in order], "p": {p: positions[p][1] for p in order},
                          "s": {p: positions[p][2] for p in order}, "t": {p: positions[p][3] for p in order}}
     log.info("Магазин: героев с данными %d, предметов %d, скиллов %d, талантов %d", len(data), len(table), len(abil), len(tal))
     buy = {}
@@ -106,7 +115,13 @@ def collect():
     def parts(key):                       # из чего собирается предмет: части и рецепт (если он платный)
         if key in buy or key not in items:
             return
-        comps = list(items[key].get("components") or [])
+        comps = [c for c in items[key].get("components") or [] if c]
+        base, _, level = key.rpartition("_")
+        if not comps and level.isdigit() and int(level) > 1 and "recipe_" + base in items:
+            # уровни Дагона: OpenDota частей не даёт, это прошлый уровень + тот же рецепт
+            prev = base if level == "2" else f"{base}_{int(level) - 1}"
+            if prev in items:
+                comps = [prev, "recipe_" + base]
         recipe = "recipe_" + key
         if comps and recipe not in comps and (items.get(recipe) or {}).get("cost"):
             comps.append(recipe)
@@ -273,7 +288,7 @@ JS_TEMPLATE = r'''
 		return "#ff5a5a";
 	}
 
-	function itemCell( parent, idx, pct )
+	function itemCell( parent, idx, pct, games )
 	{
 		var key = ITEMS[ idx ];
 		var cell = $.CreatePanel( "Panel", parent, "" );
@@ -281,7 +296,7 @@ JS_TEMPLATE = r'''
 		cell.style.marginRight = "6px";
 		cell.style.marginBottom = "3px";
 		itemPanel( cell, key ).SetPanelEvent( "oncontextmenu", function () { buy( key ); } );
-		var p = label( cell, pct + "%", 11, pctColor( pct ) );
+		var p = games ? label( cell, games + " игр", 11, "#9fd4ff" ) : label( cell, pct + "%", 11, pctColor( pct ) );
 		p.hittest = false;
 		p.style.horizontalAlign = "center";
 		p.style.fontWeight = "bold";
@@ -480,6 +495,15 @@ JS_TEMPLATE = r'''
 					itemCell( row, e[ 0 ], e[ 1 ] );
 				}
 			}
+			var fresh = d.f || [];
+			if ( fresh.length )
+			{
+				header( col, "НОВОЕ В __PATCH__" );
+				var frow = $.CreatePanel( "Panel", col, "" );
+				frow.style.flowChildren = "right-wrap";
+				frow.style.width = "100%";
+				for ( var n = 0; n < fresh.length; n++ ) { itemCell( frow, fresh[ n ][ 0 ], 0, fresh[ n ][ 1 ] ); }
+			}
 			skillsAndTalents( col, d, pos );
 		}
 		return b;
@@ -549,7 +573,19 @@ def needs_refresh() -> bool:
     if not is_installed():
         return False
     state = _read_state()
-    return time.time() - state.get("built_at", 0) > REFRESH_SECONDS or state.get("game") != _game_signature()
+    return time.time() - state.get("built_at", 0) > REFRESH_SECONDS or state.get("game") != _game_signature() \
+        or state.get("format") != FORMAT
+
+
+def refresh_abilities() -> None:
+    """Список скиллов и талантов из файлов игры (меньше пары секунд); нужен и оверлейным сборкам."""
+    if not d.game_dir():
+        return
+    try:
+        ability_info.generate()
+        skill_order.reload()
+    except (OSError, KeyError, ValueError, struct.error) as e:
+        log.warning("Не удалось обновить список скиллов героев: %s", e)
 
 
 def uninstall() -> Tuple[bool, str]:
@@ -566,15 +602,11 @@ def build() -> Tuple[bool, str]:
     """Собирает данные и записывает пак. При открытой Dota файл занят — вернёт (False, причина)."""
     if not d.game_dir():
         return False, "Не нашёл папку Dota 2."
-    if _read_state().get("game") != _game_signature():   # игра обновилась: новые герои и скиллы
-        try:
-            ability_info.generate()
-            skill_order.reload()
-        except (OSError, KeyError, ValueError) as e:
-            log.warning("Не удалось обновить список скиллов героев: %s", e)
+    refresh_abilities()             # каждый раз: список мог собрать прежний разбор, а не только прежняя игра
     try:
         data, table, buy, names, abil, tal = collect()
-        js = (JS_TEMPLATE.replace("__DATA__", json.dumps(data, separators=(",", ":")))
+        js = (JS_TEMPLATE.replace("__PATCH__", PATCH_NAME)
+              .replace("__DATA__", json.dumps(data, separators=(",", ":")))
               .replace("__ITEMS__", json.dumps(table, separators=(",", ":")))
               .replace("__BUY__", json.dumps(buy, separators=(",", ":")))
               .replace("__HEROES__", json.dumps(names, separators=(",", ":")))
@@ -592,7 +624,7 @@ def build() -> Tuple[bool, str]:
     try:
         os.makedirs(DATA_DIR, exist_ok=True)
         with open(STATE_FILE, "w", encoding="utf-8") as f:
-            json.dump({"built_at": time.time(), "game": _game_signature()}, f)
+            json.dump({"built_at": time.time(), "game": _game_signature(), "format": FORMAT}, f)
     except OSError:
         pass
     log.info("Пак магазина записан: %s (%d байт)", path, len(out))

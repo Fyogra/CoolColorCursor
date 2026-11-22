@@ -5,12 +5,14 @@ from __future__ import annotations
 import json
 import os
 import re
+import threading
 from app import dota_mod as d
 from app.config import DATA_DIR
 
 ASSET_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "abilities.json")
 DATA_PATH = os.path.join(DATA_DIR, "abilities.json")
 
+_WRITE = threading.Lock()         # список пишут и поток при запуске, и сборка пака
 TOKEN = re.compile(r'"((?:[^"\\]|\\.)*)"|([{}])|//[^\n]*')
 
 
@@ -48,6 +50,18 @@ def slots_of(text):
     return out
 
 
+def _has(text, ability, pattern) -> bool:
+    """Есть ли поле в описании способности внутри файла героя."""
+    m = re.search(rf'"{re.escape(ability)}"\s*(?://[^\n]*)?\s*\{{', text)
+    if not m:
+        return False
+    depth, i = 1, m.end()
+    while depth and i < len(text):
+        depth += {"{": 1, "}": -1}.get(text[i], 0)
+        i += 1
+    return bool(re.search(pattern, text[m.end():i]))
+
+
 def collect() -> dict:
     """По id героя: a — три скилла и ульта, t — четыре пары талантов, s — все свои способности по слотам."""
     base = os.path.join(d.game_dir(), "dota", "pak01_dir.vpk")
@@ -73,6 +87,12 @@ def collect() -> dict:
         main4 = draft or [slots.get(1), slots.get(2), slots.get(3), slots.get(6)]
         if not all(main4):
             continue
+        # Морф: в третьем слоте пустышка, настоящий скилл — в четвёртом
+        main4 = [slots.get(4) if i < 3 and a == "generic_hidden" else a for i, a in enumerate(main4)]
+        # Огр: в шестом слоте врождённая, ульта — следом за ней
+        if _has(text, main4[3], r'"Innate"\s+"1"'):
+            main4[3] = next((a for n, a in sorted(slots.items())
+                             if n > 6 and _has(text, a, r'"AbilityType"\s+"[^"]*ULTIMATE')), main4[3])
         talents = [v for n, v in sorted(slots.items()) if v.startswith("special_bonus")]
         tiers = [[talents[i], talents[i + 1]] for i in range(0, 8, 2)] if len(talents) == 8 else []
         own = [slots[n] for n in range(1, 7) if slots.get(n) and "hidden" not in slots[n] and not slots[n].startswith("special_bonus") and not re.search(r"switch|_break$|_stop$|_in$|_out$", slots[n])]
@@ -87,7 +107,8 @@ def generate(path: str = DATA_PATH) -> int:
         raise ValueError("в файлах игры не нашлось героев")
     os.makedirs(os.path.dirname(path), exist_ok=True)
     tmp = path + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as f:
-        json.dump(out, f, separators=(",", ":"))
-    os.replace(tmp, path)
+    with _WRITE:
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(out, f, separators=(",", ":"))
+        os.replace(tmp, path)
     return len(out)
