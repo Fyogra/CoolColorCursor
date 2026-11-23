@@ -16,6 +16,7 @@ from app.builds_data import (BuildsError, BuildsService, NoGamesError, STRATZ_MI
 
 PAUSE = 3.0           # между героями: у Stratz лимит 150 запросов в минуту
 RETRIES = 3
+CONST_RETRIES = 5     # справочники: паузы 1+2+3+4 минуты
 MAX_FAILED = 0.2      # доля героев без данных, после которой прогон считается проваленным
 KEEP_DAYS = 10        # дольше старую позицию не держим, если новая выборка не совсем крошечная
 EXPIRED_MIN = 50      # «не совсем крошечная»: столько игр или половина старой выборки
@@ -99,15 +100,17 @@ def main() -> int:
         print("Нет STRATZ_TOKEN")
         return 2
     service = BuildsService()
-    for attempt in range(RETRIES):
+    # OpenDota иногда минутами отвечает 520 (так упал прогон 22.11): ждём до ~15 минут, а не полторы
+    for attempt in range(CONST_RETRIES):
         try:
             consts = service.constants(force=True)
             break
         except BuildsError as e:
-            if attempt == RETRIES - 1:
+            if attempt == CONST_RETRIES - 1:
                 print(f"Справочники OpenDota не загрузились: {e}")
                 return 1
-            time.sleep(30)
+            print(f"Справочники OpenDota: {e}, повтор через {60 * (attempt + 1)} с", flush=True)
+            time.sleep(60 * (attempt + 1))
     ids = [int(x) for x in args.only.split(",") if x.strip()] or sorted(consts.heroes)
     folder = os.path.join(args.out, "builds")
     os.makedirs(folder, exist_ok=True)
