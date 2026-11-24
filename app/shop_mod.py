@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import struct
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
@@ -288,6 +289,12 @@ JS_TEMPLATE = r'''
 		return "#ff5a5a";
 	}
 
+	function gamesWord( n )
+	{
+		var a = n % 10, b = n % 100;
+		return a === 1 && b !== 11 ? "игра" : a >= 2 && a <= 4 && ( b < 12 || b > 14 ) ? "игры" : "игр";
+	}
+
 	function itemCell( parent, idx, pct, games )
 	{
 		var key = ITEMS[ idx ];
@@ -296,7 +303,7 @@ JS_TEMPLATE = r'''
 		cell.style.marginRight = "6px";
 		cell.style.marginBottom = "3px";
 		itemPanel( cell, key ).SetPanelEvent( "oncontextmenu", function () { buy( key ); } );
-		var p = games ? label( cell, games + " игр", 11, "#9fd4ff" ) : label( cell, pct + "%", 11, pctColor( pct ) );
+		var p = games ? label( cell, games + " " + gamesWord( games ), 11, "#9fd4ff" ) : label( cell, pct + "%", 11, pctColor( pct ) );
 		p.hittest = false;
 		p.style.horizontalAlign = "center";
 		p.style.fontWeight = "bold";
@@ -577,15 +584,25 @@ def needs_refresh() -> bool:
         or state.get("format") != FORMAT
 
 
+_REFRESH = threading.Lock()
+_refreshed = {"at": 0.0}
+
+
 def refresh_abilities() -> None:
-    """Список скиллов и талантов из файлов игры (меньше пары секунд); нужен и оверлейным сборкам."""
+    """Список скиллов и талантов из файлов игры (меньше пары секунд); нужен и оверлейным сборкам.
+
+    Зовут и поток при запуске, и сборка пака: по очереди, и второй раз подряд не разбираем."""
     if not d.game_dir():
         return
-    try:
-        ability_info.generate()
-        skill_order.reload()
-    except (OSError, KeyError, ValueError, struct.error) as e:
-        log.warning("Не удалось обновить список скиллов героев: %s", e)
+    with _REFRESH:
+        if time.time() - _refreshed["at"] < 60:
+            return
+        try:
+            ability_info.generate()
+            skill_order.reload()
+            _refreshed["at"] = time.time()
+        except (OSError, KeyError, ValueError, struct.error) as e:
+            log.warning("Не удалось обновить список скиллов героев: %s", e)
 
 
 def uninstall() -> Tuple[bool, str]:

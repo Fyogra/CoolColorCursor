@@ -18,6 +18,7 @@ PAUSE = 3.0           # между героями: у Stratz лимит 150 за
 RETRIES = 3
 CONST_RETRIES = 5     # справочники: паузы 1+2+3+4 минуты
 MAX_FAILED = 0.2      # доля героев без данных, после которой прогон считается проваленным
+RUN_LIMIT = 50 * 60   # шаг в builds.yml убивают через 60 мин: к этому времени записываем index и выходим сами
 KEEP_DAYS = 10        # дольше старую позицию не держим, если новая выборка не совсем крошечная
 EXPIRED_MIN = 50      # «не совсем крошечная»: столько игр или половина старой выборки
 
@@ -121,7 +122,13 @@ def main() -> int:
         print(f"Новые предметы не обновились: {e}", flush=True)
         fresh = None
     failed, waiting = [], []
+    started = time.time()
     for n, hero_id in enumerate(ids, 1):
+        if time.time() - started > RUN_LIMIT:
+            rest = ids[n - 1:]
+            print(f"Не уложились в {RUN_LIMIT // 60} мин: {len(rest)} героев остаются на прежних данных", flush=True)
+            failed.extend(rest)
+            break
         data, no_games = None, False
         path = os.path.join(folder, f"{hero_id}.json")
         old = load_old(path)
@@ -134,7 +141,8 @@ def main() -> int:
                 break
             except BuildsError as e:
                 print(f"[{n}/{len(ids)}] герой {hero_id}: {e} (попытка {attempt + 1})", flush=True)
-                time.sleep(65 if "много запросов" in str(e) else 10)
+                if attempt < RETRIES - 1:       # после последней попытки ждать незачем
+                    time.sleep(65 if "много запросов" in str(e) else 10)
         if data is None and not (no_games and old):
             failed.append(hero_id)  # остаются прежние данные и дата, только без удалённых предметов
             if old:
@@ -154,8 +162,8 @@ def main() -> int:
         print(f"[{n}/{len(ids)}] {consts.hero_name(hero_id)} ok", flush=True)
         time.sleep(PAUSE)
 
-    with open(os.path.join(args.out, "index.json"), "w", encoding="utf-8") as f:
-        json.dump({"generated": int(time.time()), "heroes": len(ids) - len(failed), "failed": failed, "waiting": waiting}, f)
+    save(os.path.join(args.out, "index.json"),
+         {"generated": int(time.time()), "heroes": len(ids) - len(failed), "failed": failed, "waiting": waiting})
     print(f"Готово: {len(ids) - len(failed)} из {len(ids)}, без данных: {failed}, ждут статистику: {len(waiting)}")
     if len(waiting) > MAX_FAILED * len(ids):
         # после патча Stratz днями отдаёт null у всех и без ошибок: это не провал, старые сборки целы

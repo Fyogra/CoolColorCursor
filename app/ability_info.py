@@ -88,7 +88,8 @@ def collect() -> dict:
         if not all(main4):
             continue
         # Морф: в третьем слоте пустышка, настоящий скилл — в четвёртом
-        main4 = [slots.get(4) if i < 3 and a == "generic_hidden" else a for i, a in enumerate(main4)]
+        if slots.get(4):
+            main4 = [slots[4] if i < 3 and a == "generic_hidden" else a for i, a in enumerate(main4)]
         # Огр: в шестом слоте врождённая, ульта — следом за ней
         if _has(text, main4[3], r'"Innate"\s+"1"'):
             main4[3] = next((a for n, a in sorted(slots.items())

@@ -21,6 +21,12 @@ from app.ui_common import DragHeader, caption, make_button
 # ──────────────────────────────────────────────────────────────────────────────
 VK_LBUTTON = 0x01
 
+
+def games_word(n: int) -> str:
+    a, b = n % 10, n % 100
+    return "игра" if a == 1 and b != 11 else "игры" if 2 <= a <= 4 and not 12 <= b <= 14 else "игр"
+
+
 SHOP_PROBE_WIDTH = 640       # кадр уменьшаем до такой ширины: быстро, и пороги не зависят от разрешения
 SHOP_STABLE_FRAMES = 2       # столько кадров подряд должны согласованно показывать «магазин»
 # Магазин у края экрана: тёмное ровное поле у самого края (A) и рядом сетка иконок (B).
@@ -670,7 +676,7 @@ class BuildsWindow(QWidget):
 
         role_text = f"{POSITIONS[self.role]} · {POSITION_NAMES[self.role]}"
         if self.data:
-            role_text += f" · {games} игр" if games else " · игр на этой позиции нет"
+            role_text += f" · {games} {games_word(games)}" if games else " · игр на этой позиции нет"
         self.lbl_role.setText(role_text)
         for i, btn in enumerate(self.role_buttons):
             g = ((self.data or {}).get("positions") or {}).get(str(i + 1), {}).get("games", 0)
@@ -714,7 +720,7 @@ class BuildsWindow(QWidget):
             self.talents_grid.addWidget(caption("Данных о талантах нет (нужны данные Stratz).", size=9, color=DIM), 0, 0)
 
     def _item_cell(self, key: str, pct: int, games: int = 0) -> QWidget:
-        note = f"{games} игр" if games else f"{pct}%"
+        note = f"{games} {games_word(games)}" if games else f"{pct}%"
         cell = QWidget()
         v = QVBoxLayout(cell)
         v.setContentsMargins(0, 0, 0, 0)
