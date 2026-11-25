@@ -14,13 +14,13 @@ from typing import Tuple
 from app import dota_mod as d
 from app.builds_data import CACHE_DIR, PATCH_NAME, PUBLISHED_URL, BuildsService
 from app.config import DATA_DIR, log
-from app import ability_info, skill_order
+from app import ability_info, ally_ults, skill_order
 from app.skill_order import normalize, _info as so_info
 
 JS = "panorama/scripts/hud/dota_hud_shop.vjs_c"
 STATE_FILE = os.path.join(DATA_DIR, "shop_state.json")
 REFRESH_SECONDS = 20 * 3600
-FORMAT = 2                       # поднять, если новая версия должна сразу пересобрать пак
+FORMAT = 3                       # поднять, если новая версия должна сразу пересобрать пак
 PHASES = ("start", "early", "mid", "late")
 LIMITS = {"start": 15, "early": 15, "mid": 15, "late": 15}
 RARE_PCT = 6          # предметы реже этого % отбрасываем (но не меньше двух в стадии)
@@ -629,6 +629,7 @@ def build() -> Tuple[bool, str]:
               .replace("__HEROES__", json.dumps(names, separators=(",", ":")))
               .replace("__ABIL__", json.dumps(abil, separators=(",", ":")))
               .replace("__TAL__", json.dumps(tal, separators=(",", ":"))))
+        js += ally_ults.js()           # кулдауны ульт союзников под Alt — отдельный кусок того же скрипта
         if not data:
             return False, "Нет данных сборок (нет сети?)."
         blob = d._read_file(os.path.join(d.game_dir(), "dota", "pak01_dir.vpk"), JS)

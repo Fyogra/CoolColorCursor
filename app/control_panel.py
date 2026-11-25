@@ -100,7 +100,7 @@ class ControlPanel(QWidget):
         self._build_ui()
         self._build_tray()
         try:
-            dota_mod.relocate()  # старые версии клали маркер в pak67 — этот номер у Minify
+            dota_mod.relocate()  # старые версии клали маркер в pak67 — этот номер не наш
         except OSError as e:     # Dota открыта — перенесём при следующей пересборке пака
             log.info("Паки не перенесены: %s", e)
         self._ensure_ingame_marker()
