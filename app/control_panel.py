@@ -52,6 +52,8 @@ class ControlPanel(QWidget):
     WIDTH, HEIGHT = 380, 698
     shopModeDone = pyqtSignal(str, bool, str)    # режим сборок, получилось ли, причина — из фонового потока
     updateChecked = pyqtSignal(object, object)   # новая версия (или None), все релизы (None — нет сети)
+    updateFound = pyqtSignal(object)             # повторная проверка, пока программа открыта: новая версия или None
+    UPDATE_EVERY_MS = 2 * 60 * 60 * 1000         # как часто проверять обновления, пока программа открыта
 
     QUICK_COLORS = ("#ff0055", "#ff6600", "#ffcc00", "#00ffc8", "#00ccff", "#0055ff", "#9d00ff", "#ffffff")
     def __init__(self):
@@ -137,9 +139,14 @@ class ControlPanel(QWidget):
         log.info("Версия %s", VERSION)
         self._cleanup_old_version()
         self._pending_dialogs = []
+        self._offered_updates = set()                # теги версий, которые уже предлагали в этот запуск
         self.updateChecked.connect(self._on_update_checked)
+        self.updateFound.connect(self._on_update_found)
         threading.Thread(target=lambda: self.updateChecked.emit(*updater.check()), name="update-check",
                          daemon=True).start()
+        self._update_timer = QTimer(self)               # программу могут не закрывать сутками — проверяем и так
+        self._update_timer.timeout.connect(self._check_update_again)
+        self._update_timer.start(self.UPDATE_EVERY_MS)
 
     # ── сохранение ──────────────────────────────────────────────────────────
     def schedule_save(self):
@@ -509,8 +516,22 @@ class ControlPanel(QWidget):
             s.last_version = VERSION
             self.schedule_save()
         if best is not None:
+            self._offered_updates.add(best.tag)
             self._pending_dialogs.append(lambda: UpdateDialog(best))
         self._show_pending_dialogs()
+
+    def _check_update_again(self):
+        threading.Thread(target=lambda: self.updateFound.emit(updater.check()[0]), name="update-check",
+                         daemon=True).start()
+
+    def _on_update_found(self, best):
+        """Вышла версия новее, а программа всё это время открыта: предлагаем один раз на каждую версию."""
+        if best is None or best.tag in self._offered_updates or self._quitting:
+            return
+        self._offered_updates.add(best.tag)
+        self._pending_dialogs.append(lambda: UpdateDialog(best))
+        if len(self._pending_dialogs) == 1 and not getattr(self, "_dialog_open", False):   # иначе очередь дойдёт сама
+            self._show_pending_dialogs()
 
     def _cleanup_old_version(self, tries: int = 10):
         if not updater.cleanup_old() and tries > 1:     # старый exe ещё закрывается — попробуем позже
@@ -527,7 +548,11 @@ class ControlPanel(QWidget):
         log.info("Окно обновления: %s", type(dialog).__name__)
         screen = QApplication.primaryScreen().availableGeometry()
         dialog.move(screen.center() - dialog.rect().center())
-        result = dialog.exec_()
+        self._dialog_open = True
+        try:
+            result = dialog.exec_()
+        finally:
+            self._dialog_open = False
         log.info("Окно обновления закрыто: %s", "да" if result else "нет")
         dialog.deleteLater()
         if isinstance(dialog, UpdateDialog) and dialog.installed:
