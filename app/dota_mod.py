@@ -227,6 +227,11 @@ def _scan(with_tags: bool = False) -> Dict[str, str]:
     return found
 
 
+def installed_kinds() -> set:
+    """Какие наши паки сейчас лежат в dota_russian: {"marker", "shop", "rank"} или часть."""
+    return set(_scan())
+
+
 def our_pak(kind: str) -> Optional[str]:
     """Наш уже лежащий пак этого вида или None."""
     return _scan().get(kind)

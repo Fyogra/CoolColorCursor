@@ -194,6 +194,7 @@ class Settings:
         self.rank_game = ""              # версия игры, из которой собран пак рангов
         self.rank_set = ""               # свой набор иконок рангов ("" — родные)
         self.builds_auto = True      # True — сборки автоматически появляются при открытом магазине
+        self.builds_shop = None      # сборки в магазине Dota (наш пак) выбраны; None — старый конфиг, смотрим на пак
         self.builds_gold_zone = None # (x, y, w, h) зоны кнопки золота; None — автозона 20% справа снизу
         self.launcher_enabled = True # иконка-кнопка в углу экрана
         self.launcher_pos = None
@@ -249,6 +250,8 @@ class Settings:
         s.rank_game = str(raw.get("rank_game", ""))
         s.rank_set = str(raw.get("rank_set", ""))
         s.builds_auto = bool(raw.get("builds_auto", True))
+        shop = raw.get("builds_shop")
+        s.builds_shop = bool(shop) if shop is not None else None
         gold = raw.get("builds_gold_zone")
         if isinstance(gold, (list, tuple)) and len(gold) == 4:
             try:
@@ -293,6 +296,7 @@ class Settings:
             "ingame_rest": self.ingame_rest,
             "ingame_chevron": self.ingame_chevron,
             "rank_mod": self.rank_mod,
+            "builds_shop": self.builds_shop,
             "rank_real": self.rank_real,
             "rank_real_stars": self.rank_real_stars,
             "rank_show": self.rank_show,

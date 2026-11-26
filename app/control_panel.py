@@ -49,7 +49,7 @@ def daily_presets(day: date, count: int = 5) -> list:
 
 
 class ControlPanel(QWidget):
-    WIDTH, HEIGHT = 380, 676
+    WIDTH, HEIGHT = 380, 698
     shopModeDone = pyqtSignal(str, bool, str)    # режим сборок, получилось ли, причина — из фонового потока
     updateChecked = pyqtSignal(object, object)   # новая версия (или None), все релизы (None — нет сети)
 
@@ -83,13 +83,18 @@ class ControlPanel(QWidget):
         self._shop_poll = 0
         self._shop_busy = False   # пак магазина пишется в фоне
         self._shop_pending = ""   # режим сборок, который сейчас ставится в фоне
-        self.builds_mode = "shop" if shop_mod.is_installed() else "overlay"   # где сборки: в магазине Dota или в оверлее
+        self.builds_mode = "overlay"   # где сборки: в магазине Dota или в оверлее (выбор из настроек — ниже)
+        self._mods_seen = set()        # какие наши паки лежат в dota_russian (проверка раз в 2 с)
+        self._repair_at = {}           # когда последний раз пробовали поставить пропавший пак заново
         self.active = 0  # какой цвет редактируем: 0 — основной, 1 — дополнительный
         self.history_buttons = []
         self._quitting = False
         self._tray_hint_shown = False
 
         self.settings = Settings.load(CONFIG_FILE)
+        if self.settings.builds_shop is None:          # конфиг старой версии: выбор узнаём по паку
+            self.settings.builds_shop = shop_mod.is_installed()
+        self.builds_mode = "shop" if self.settings.builds_shop else "overlay"
 
         # Слайдеры дёргают сохранение на каждый пиксель — склеиваем записи в одну
         self._save_timer = QTimer(self)
@@ -323,6 +328,16 @@ class ControlPanel(QWidget):
 
         root.addStretch()
 
+        # Состояние модов в игре: стоит ли каждый наш пак на самом деле (Steam при обновлении может их стереть)
+        self.lbl_mods = QLabel()
+        self.lbl_mods.setFont(QFont(FONT_SYMBOL, 8, QFont.Bold))
+        self.lbl_mods.setAlignment(Qt.AlignCenter)
+        self.lbl_mods.setStyleSheet("background: transparent;")
+        self.lbl_mods.setToolTip("Моды в игре: ✓ — стоит, ✗ — файла нет (программа сама поставит заново, "
+                                 "в игре появится после перезапуска Dota 2), ⏳ — собирается, «выкл» — не включён.\n"
+                                 "Ульты союзников под Alt идут в одном файле со сборками в магазине.")
+        root.addWidget(self.lbl_mods)
+
         self.btn_dota = make_button("🎮 ОТКРЫТЬ ДОТУ", height=38, font=QFont(FONT_SYMBOL, 10, QFont.Bold),
                                     style=outline_button_style(ACCENT))
         self.btn_dota.setToolTip("Запустить Dota 2 через Steam")
@@ -332,6 +347,7 @@ class ControlPanel(QWidget):
 
         self._refresh_toggle_ui()
         self._refresh_dota_ui()
+        self._refresh_mods_ui(scan=True)
         self._refresh_color_buttons()
         self._refresh_history_ui()
 
@@ -848,6 +864,14 @@ class ControlPanel(QWidget):
         if self._ticks % 10 == 0:  # раз в ~2 секунды: игра в окне без рамки может перехватить верхний слой
             self._raise_overlays()
             self._refresh_dota_button()
+            self._refresh_mods_ui(scan=True)
+        if self._ticks % 25 == 0:  # раз в 5 секунд: пропавшие паки включённых модов ставим заново
+            self._repair_mods()
+        busy = bool(self._shop_busy or self._shop_pending)
+        if self._ticks % 5 == 0 and (busy or getattr(self, "_was_busy", False)):   # «собираю» ↔ проценты раз в секунду
+            self._was_busy = busy                       # и ещё раз после конца: кнопки снова доступны
+            self._refresh_dota_ui()
+            self._refresh_mods_ui(scan=not busy)
         self._refresh_gsi_status(snap)
 
     def _apply_game_focus(self) -> bool:
@@ -1028,10 +1052,10 @@ class ControlPanel(QWidget):
             s.rank_game = game
             self.schedule_save()
 
-    def _refresh_shop_pack(self):
-        """Пак магазина уже стоит, но данные старше суток или игра обновилась — пересобираем в фоне.
-        Пока Dota открыта, файл занят: не страшно, попробуем при следующей проверке."""
-        if self._shop_busy or not shop_mod.needs_refresh():
+    def _refresh_shop_pack(self, force: bool = False):
+        """Пак магазина уже стоит, но данные старше суток или игра обновилась — пересобираем в фоне
+        (force — пак пропал, ставим заново). Пока Dota открыта, файл занят: попробуем при следующей проверке."""
+        if self._shop_busy or not (force or shop_mod.needs_refresh()):
             return
         self._shop_busy = True
 
@@ -1099,8 +1123,7 @@ class ControlPanel(QWidget):
         def work():
             try:
                 if mode == "shop":
-                    self.builds_service.constants()      # пак собирается из справочников в кэше
-                    ok, err = shop_mod.build()
+                    ok, err = shop_mod.build()           # справочники OpenDota подкачивает сама сборка
                 else:
                     ok, err = shop_mod.uninstall()
             except Exception as e:                       # фоновая задача не должна ронять программу
@@ -1113,7 +1136,10 @@ class ControlPanel(QWidget):
         self._shop_busy, self._shop_pending = False, ""
         if ok:
             self.builds_mode = mode
+            self.settings.builds_shop = mode == "shop"
+            self.schedule_save()
             self.shop_detector.reset()
+        self._refresh_mods_ui(scan=True)
         self._refresh_dota_ui()
         if not ok:
             self._info("СБОРКИ", err or "Не получилось.")
@@ -1222,7 +1248,11 @@ class ControlPanel(QWidget):
             for btn, mode, text in ((self.btn_mode_shop, "shop", "🛒 В МАГАЗИНЕ"), (self.btn_mode_overlay, "overlay", "🪟 ОВЕРЛЕЙ"),
                                     (self.btn_mode_off, "off", "✖ ВЫКЛ")):
                 on = current == mode
-                btn.setText(("⏳ СОБИРАЮ…" if mode == "shop" else "⏳ УБИРАЮ…") if busy == mode else ("✓ " + text[2:] if on else text))
+                if busy == mode:
+                    text = self._building_text("⏳ СОБИРАЮ…", "⏳ {}%") if mode == "shop" else "⏳ УБИРАЮ…"
+                else:
+                    text = "✓ " + text[2:] if on else text
+                btn.setText(text)
                 btn.setEnabled(not self._shop_busy)
                 btn.setStyleSheet(outline_button_style(ACCENT if on else DIM, radius=13))
         for name in ("act_builds", "act_auto"):
@@ -1235,6 +1265,58 @@ class ControlPanel(QWidget):
         self._set_check(self.act_timers, timers)
         self._set_check(self.act_sound, self.settings.sound_enabled)
         self._set_check(self.act_launcher, self.launcher is not None)
+
+    def _building_text(self, word: str, percent: str) -> str:
+        """Пока пак магазина собирается: раз в секунду меняем «собираю» и проценты."""
+        if not shop_mod.PROGRESS["stage"] or (self._ticks // 5) % 2 == 0:
+            return word
+        return percent.format(shop_mod.progress_percent())
+
+    def _refresh_mods_ui(self, scan: bool = False):
+        """Строка «моды» над кнопкой Доты: что из наших паков стоит на самом деле."""
+        if scan:
+            try:
+                self._mods_seen = dota_mod.installed_kinds() if dota_mod.game_dir() else set()
+            except OSError:
+                self._mods_seen = set()
+        if not getattr(self, "lbl_mods", None):
+            return
+        s = self.settings
+        shop_on = self.builds_mode == "shop" or self._shop_pending == "shop"
+        building = self._shop_busy and self._shop_pending != "overlay" and shop_mod.PROGRESS["stage"]
+        parts = []
+        for name, kind, wanted in (("СБОРКИ", "shop", shop_on), ("УЛЬТЫ", "shop", shop_on),
+                                   ("МАРКЕР", "marker", s.ingame_marker), ("РАНГ", "rank", s.rank_mod)):
+            if not wanted:
+                color, mark = DIM, "выкл"
+            elif kind == "shop" and building:
+                color, mark = ACCENT, self._building_text("⏳", "⏳{}%")
+            elif kind in self._mods_seen:
+                color, mark = ACCENT, "✓"
+            else:
+                color, mark = DANGER, "✗"
+            parts.append(f'<span style="color:{color}">{name} {mark}</span>')
+        self.lbl_mods.setText(f'<span style="color:{DIM}">МОДЫ:</span>&nbsp; ' + " &nbsp;·&nbsp; ".join(parts))
+
+    def _repair_mods(self):
+        """Включённый мод, а файла нет (Steam стёр при обновлении или проверке файлов) — ставим заново.
+        Каждый вид не чаще раза в минуту, чтобы при ошибке записи не дёргать диск постоянно."""
+        if not dota_mod.game_dir():
+            return
+        s, now = self.settings, time.time()
+
+        def due(kind):
+            if now - self._repair_at.get(kind, 0) < 60:
+                return False
+            self._repair_at[kind] = now
+            log.info("Пак «%s» пропал из dota_russian — ставлю заново", kind)
+            return True
+        if self.builds_mode == "shop" and not self._shop_busy and "shop" not in self._mods_seen and due("shop"):
+            self._refresh_shop_pack(force=True)
+        if s.ingame_marker and "marker" not in self._mods_seen and due("marker"):
+            self._ensure_ingame_marker()
+        if s.rank_mod and "rank" not in self._mods_seen and due("rank"):
+            self._ensure_rank_mod()
 
     def install_gsi(self):
         installed, path = install_gsi_config(DATA_DIR)

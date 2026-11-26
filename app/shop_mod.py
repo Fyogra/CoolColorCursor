@@ -9,7 +9,7 @@ import struct
 import threading
 import time
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Tuple
 from app import dota_mod as d
 from app.builds_data import CACHE_DIR, PATCH_NAME, PUBLISHED_URL, BuildsService
@@ -28,6 +28,18 @@ RARE_PCT_THIN = 3     # ...а на непопулярной позиции ге�
 THIN_SHARE = 0.25
 MAX_MISSING = 0.1     # доля героев без скачанных сборок, при которой пак не пересобираем
 
+# Ход сборки пака для окна программы (пишет фоновый поток, читает тик интерфейса):
+# stage "" — не собираем, "prep" — справочники и список скиллов, "fetch" — качаем сборки героев (done из total)
+PROGRESS = {"stage": "", "done": 0, "total": 0}
+
+
+def progress_percent() -> int:
+    """Сколько процентов сборки пака готово: справочники — до 5 %, сборки героев — 5…95 %, запись — 99 %."""
+    p = PROGRESS
+    if p["stage"] == "fetch" and p["total"]:
+        return 5 + 90 * p["done"] // p["total"]
+    return {"prep": 2, "write": 99}.get(p["stage"], 0)
+
 
 def fetch(hero_id):
     try:
@@ -42,8 +54,13 @@ def collect():
     consts = json.load(open(os.path.join(CACHE_DIR, "constants.json"), encoding="utf-8"))["data"]
     heroes = {int(k): v for k, v in consts["heroes"].items()}
     items = consts["items"]
+    PROGRESS.update(stage="fetch", done=0, total=len(heroes))
+    results = {}
     with ThreadPoolExecutor(16) as ex:
-        results = dict(ex.map(fetch, list(heroes)))
+        for fut in as_completed([ex.submit(fetch, h) for h in heroes]):
+            hero_id, build = fut.result()
+            results[hero_id] = build
+            PROGRESS["done"] += 1
     missing = [h for h in heroes if not results.get(h)]
     if len(missing) > MAX_MISSING * len(heroes):     # сеть подвела — лучше оставить прежний пак, чем урезанный
         raise OSError(f"не загрузились сборки {len(missing)} героев из {len(heroes)} (нет сети?)")
@@ -619,9 +636,18 @@ def build() -> Tuple[bool, str]:
     """Собирает данные и записывает пак. При открытой Dota файл занят — вернёт (False, причина)."""
     if not d.game_dir():
         return False, "Не нашёл папку Dota 2."
+    PROGRESS.update(stage="prep", done=0, total=0)
+    try:
+        return _build()
+    finally:
+        PROGRESS.update(stage="", done=0, total=0)
+
+
+def _build() -> Tuple[bool, str]:
     refresh_abilities()             # каждый раз: список мог собрать прежний разбор, а не только прежняя игра
     try:
         data, table, buy, names, abil, tal = collect()
+        PROGRESS["stage"] = "write"
         js = (JS_TEMPLATE.replace("__PATCH__", PATCH_NAME)
               .replace("__DATA__", json.dumps(data, separators=(",", ":")))
               .replace("__ITEMS__", json.dumps(table, separators=(",", ":")))
