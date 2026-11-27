@@ -4,7 +4,7 @@
 игроку он отдаёт только своего героя, блок allplayers приходит лишь зрителям.
 
 Источники данных, по каждому герою первый, что сработал:
-- способности героя через Entities/Abilities: точный откат и Alt+клик — родной пинг в чат. Работает в демо
+- способности героя через Entities/Abilities: точный откат. Работает в демо
   героя; в обычном матче способности союзников моду недоступны (имя юнита пустое);
 - Game.GetPlayerUltimateStateOrTime(игрок) — им пользуется таблица счёта пользовательских игр: остаток отката
   в секундах. В обычном матче (лобби с ботами, 27.11) отдаёт −3 у всех — тогда идём дальше;
@@ -194,12 +194,6 @@ JS_TEMPLATE = r'''
 		w.time = t;
 		w.ab = -1;
 		w.iconName = "";
-		// Alt+клик: родной пинг способности, если игра отдала способность (демо); иначе — строка в командный чат
-		w.SetPanelEvent( "onactivate", function ()
-		{
-			if ( w.ab >= 0 ) { Abilities.PingAbility( w.ab ); return; }
-			chat( w );
-		} );
 		return w;
 	}
 
@@ -207,43 +201,12 @@ JS_TEMPLATE = r'''
 	{
 		w.style.opacity = on ? "__OPACITY__" : "0";
 		w.style.preTransformScale2d = on ? "1" : "0.8";
-		w.hittest = on;
-	}
-
-	// Те же строки, что у родного пинга способности (DOTA_Ability_Ping_*), только без HTML: say_team шлёт текст как есть
-	function ping( key, args )
-	{
-		var s = $.Localize( "#" + key );
-		for ( var i = args.length; i >= 1; i-- ) { s = s.split( "%s" + i ).join( args[ i - 1 ] ); }
-		return s.replace( /<[^>]*>/g, "" ).replace( /\s+/g, " " ).trim();
-	}
-
-	function chat( w )
-	{
-		if ( !w.iconName || !w.heroName ) { return; }
-		var ult = $.Localize( "#DOTA_Tooltip_ability_" + w.iconName );
-		var whose = "";
-		if ( w.pid >= 0 && w.pid != Players.GetLocalPlayer() )
-		{
-			whose = ping( "DOTA_Ability_Ping_Ally_Description", [ "", $.Localize( "#npc_dota_hero_" + w.heroName ) ] ) + " ";
-		}
-		var info = ULTS[ w.heroName ];
-		var rank = info ? rankFor( levelOf( w.pid ), info[ 1 ].length ) : 1;
-		var msg;
-		if ( !w.learned ) { msg = ping( "DOTA_Ability_Ping_Unlearned", [ whose, ult, "" ] ); }
-		else if ( w.left > 0 ) { msg = ping( "DOTA_Ability_Ping_Cooldown", [ whose, ult, "", String( Math.ceil( w.left ) ), String( rank ) ] ); }
-		else if ( w.unknown ) { msg = ping( "DOTA_Ability_Ping_Cooldown_No_Time", [ whose, ult, "", String( rank ) ] ); }
-		else { msg = ping( "DOTA_Ability_Ping_Ready", [ whose, ult, "", String( rank ) ] ); }
-		try { Game.ServerCmd( "say_team \"" + msg.replace( /"/g, "'" ) + "\"" ); }
-		catch ( e ) { $.Msg( "CCC ult chat: " + e ); }
+		w.hittest = false;   // клики проходят к портрету
 	}
 
 	// Кольцо и текст: done — какая часть отката прошла (0…1), left — секунд до готовности (0 — готова)
 	function paint( w, learned, done, left, text )
 	{
-		w.learned = !!learned;
-		w.left = learned && left > 0 ? left : 0;
-		w.unknown = !!text;
 		if ( !learned )
 		{
 			w.ring.style.clip = "radial( 50% 50%, 0deg, 0deg )";
@@ -422,11 +385,9 @@ JS_TEMPLATE = r'''
 			if ( !img ) { continue; }
 			var w = widget( slot );
 			var name = img.heroname;
-			w.heroName = name;
 			var list = heroes[ name ] || [];
 			var n = used[ name ] = ( used[ name ] || 0 );
 			var p = list[ n ];
-			w.pid = p ? p.id : -1;
 			used[ name ]++;
 			if ( !alt || !name || ( !p && !ULTS[ name ] ) )
 			{
