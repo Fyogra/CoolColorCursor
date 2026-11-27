@@ -20,7 +20,7 @@ from app.skill_order import normalize, _info as so_info
 JS = "panorama/scripts/hud/dota_hud_shop.vjs_c"
 STATE_FILE = os.path.join(DATA_DIR, "shop_state.json")
 REFRESH_SECONDS = 20 * 3600
-FORMAT = 3                       # поднять, если новая версия должна сразу пересобрать пак
+FORMAT = 4                       # поднять, если новая версия должна сразу пересобрать пак
 PHASES = ("start", "early", "mid", "late")
 LIMITS = {"start": 15, "early": 15, "mid": 15, "late": 15}
 RARE_PCT = 6          # предметы реже этого % отбрасываем (но не меньше двух в стадии)
